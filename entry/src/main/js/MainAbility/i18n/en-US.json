@@ -20,6 +20,7 @@
     "btn_week": "W",
     "btn_info": "i",
     "btn_day": "Today",
+    "btn_sync": "Sync",
     "home_hint": "Up: today · Left: about",
     "home_next": "Next",
     "home_cached_week": "Cached {n}, re-sync",

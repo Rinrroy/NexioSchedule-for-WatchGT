@@ -65,8 +65,7 @@
 | **今日课表** | 当天课程卡片列表、课程状态（已结束 / 进行中 / 未开始）、进行中课程的进度条、上一天与下一天切换、手动刷新 |
 | **周课表** | **仅当前周**的七行课表（周一至周日），今日高亮，日期列右对齐；只读呈现 |
 | **课程详情** | 课程名、时间、节次、地点、教师 |
-| **同步** | 局域网同步状态、同步地址切换、手动同步、文件导入与导出、蓝牙扫描发现 |
-| **设置** | 同步方式、同步地址、重置数据 |
+| **同步** | 局域网同步状态、同步地址切换、手动同步、文件导入与导出、蓝牙扫描发现（原「设置」页已删除，功能并入本页） |
 | **关于** | 应用图标、名称、版本与内存档位、作者与数据来源、返回与退出（退出带二次确认） |
 
 ### 引擎能力
@@ -76,8 +75,8 @@
 - **自研缓动补间**：Lite 只支持 linear / ease-in / ease-out / ease-in-out，且没有 requestAnimationFrame
   ⇒ 用 33 点缓动查找表 + setInterval 逐帧重绘实现 300 ms 过渡与进度环补间。
 - **方向跟手的页面转场**：上滑、下滑、左滑、右滑分别对应内容自下、自上、自右、自左进入，位移实时跟随手指。
-- **表冠交互**：setMonitorForCrownEvents() 全局注册；首页转表冠翻页（与官方活动记录一致），今日与作息页转表冠滚动列表。
-- **图标内嵌**：应用图标被量化成 96 色调色板 + 整行 RLE 点阵，直接写进 common/icon.js，不依赖 drawImage。
+- **表冠交互**：setMonitorForCrownEvents() 全局注册；首页转表冠翻页（与官方活动记录一致），今日页转表冠滚动列表。
+- **图标内嵌**：应用图标被量化成 32 色调色板 + 整行 RLE 点阵（圆形构图直接烘进点阵），写进 common/icon.js，不依赖 drawImage。
 - **中英双语**：i18n/zh-CN.json 与 i18n/en-US.json，由 @system.app.getInfo().language 判定。
 
 ---
@@ -89,11 +88,11 @@
 | **上滑** | 进入今日课表（内容自下方进入） |
 | **下滑** | 进入周课表（内容自上方进入） |
 | **左滑** | 进入关于页 |
-| **右滑** | 进入设置页；在子页上为「返回上一层」 |
-| **表冠** | 首页：左右翻页 · 今日与作息页：滚动课程列表 |
+| **右滑** | 进入周课表；在子页上为「返回上一层」 |
+| **表冠** | 首页：左右翻页 · 今日页：滚动课程列表 |
 | **点击** | 底部导航胶囊、课程卡片、日期切换按钮、同步与退出按钮 |
 
-> 首页底部三枚胶囊（今日 / 周 / 设置）与子页导航栏**完全同轴同尺寸**，位置逐像素对齐。
+> 首页底部三枚胶囊（今日 / 周 / i）与子页导航栏**完全同轴同尺寸**，位置逐像素对齐。
 
 ---
 
@@ -111,46 +110,56 @@ ReplaceSync() 里会 delete currentSm_ —— 旧页面的 JS 上下文直接被
 config.json -> module.js[0].pages = ["pages/index/index"]
 ```
 
-八个界面（home / today / week / detail / times / sync / settings / about）都是同一个 canvas 上的**视图状态**，
+六个界面（home / today / week / detail / sync / about）都是同一个 canvas 上的**视图状态**，
 由 this.view 与视图栈 this.stack 驱动。
 
 ### 2）内核分离（为 48 KB 闸门服务）
 
 真机对**每个 JS 文件**限长 49,152 B（见下文）。为了让页面文件永远待在闸门以内，把全部 common/* 模块
-在入口处**内联进 app.js**，再由入口把内核发布到全局：
+在入口处**内联进 app.js**，再由入口把内核发布到页面：
 
 ```js
-// app.js —— 顶层 import 全部 common，再发布内核
+// app.js —— 顶层 import 全部 common，再通过 ViewModel 的 data 通道发布内核
 import store from './common/store';
 import UI from './common/ui';
 // ...
-globalThis.NEXIO = { store: store, M: M, D: D, UI: UI, t: t, ICON32: ICON32, ... };
+var NEXIO = { store: store, M: M, D: D, UI: UI, t: t, ICON32: ICON32, ... };
+if (typeof globalThis !== 'undefined') { globalThis.NEXIO = NEXIO; } // 仅模拟器
+export default { data: { NEXIO: NEXIO }, onCreate: function () { ... } };
 ```
 
 ```js
-// pages/index/index.js —— 零 import
-var K = globalThis.NEXIO;
+// pages/index/index.js —— 零 import：三通道取内核（真机 -> $app -> 模拟器兜底）
+var K = null;
+try { if (typeof getApp === 'function') { var A = getApp(); if (A && A.data) K = A.data.NEXIO; } } catch (e) {}
+if (!K) { try { if (typeof $app !== 'undefined' && $app && $app.data) K = $app.data.NEXIO; } catch (e2) {} }
+if (!K && typeof globalThis !== 'undefined') K = globalThis.NEXIO;
 ```
 
 这条约束（**页面 0 import**）是硬性的：页面里任何一句 import 都会把被依赖模块复制进页面产物，
 而页面的预算只有 49,152 B。
 
+> **为什么不用 globalThis？** 真机上没有 `globalThis`（引擎只在 `JSFWK_TEST==1` 的模拟器里创建它，见「引擎坑速查」第 15 条）。
+> 写 `globalThis.NEXIO` 会让真机在求值入口时直接抛 `ReferenceError` —— 表现就是**装到真机全黑屏，但不重启**。
+> 现在内核走 `export default { data: ... }`（引擎把 app 的 VM 挂到全局 `$app`），页面用内置全局函数 `getApp().data.NEXIO` 取，模拟器与真机同一条主通道。
+> `getApp()` 只在顶层调用一次并缓存：引擎注释警告反复调用会丢引用计数，触发 `ERR_REF_COUNT_LIMIT`。
+
 ### 3）模块划分
 
 | 模块 | 职责 |
 | --- | --- |
-| app.js | 入口：import 全部 common 并发布 globalThis.NEXIO |
+| app.js | 入口：import 全部 common，通过 export default { data: { NEXIO } } 发布内核（真机无 globalThis） |
 | common/const.js | 常量与单一版本号来源、内存档位、协议版本、存储键、文件 URI |
 | common/model.js | 课程数据模型（isActiveInWeek、时间段、节次） |
-| common/store.js | 持久化与降级链（@system.file → 内存 → 种子数据）、按周过滤、JSON 读写 |
+| common/store.js | 持久化与降级链（@system.file → 内存）、按周过滤、JSON 读写；数据全部来自手机端同步 |
+| common/defaults.js | 出厂兜底：空设置 + 标准作息时间表（不携带任何示例课程） |
 | common/sync.js | 局域网 HTTP 拉取、响应解析、导入导出、超时守卫 |
 | common/ble.js | 蓝牙广播扫描（typeof 守卫 + 明文与十六进制双形态解析 + 超时回退） |
 | common/date.js | 日期与时间工具（周次推算、格式化、分钟数） |
 | common/holiday.js | 节假日名（课表行显示假期） |
 | common/ui.js | 绘制原语：textY 基线规则、roundRect、ltext / ctext / rtext、ellipsize、tw 宽度估算、缓动 ease、图标绘制、进度环 |
 | common/i18n.js | 中英文案表与占位符插值（手工 indexOf + substring） |
-| common/icon.js | 96 色调色板 + 整行 RLE 的 32×32 图标点阵 |
-| common/seed.js | 首次启动的种子课表 |
+| common/icon.js | 32 色调色板 + 整行 RLE 的 32×32 圆形图标点阵 |
 
 ---
 
@@ -194,8 +203,7 @@ GET http://<host>:8787/schedule.json?week=N    # 拉取第 N 周课表
 | --- | --- |
 | internal://app/nexio/schedule.json | 主数据文件 |
 | internal://app/import/nexio_schedule.json | 外部导入 |
-| internal://app/rawfile/nexio_schedule.json | 包内置种子 |
-| internal://app/nexio/export.json | 导出 |
+| internal://app/nexio/export.json | 导出（同步页「导出到内部文件」） |
 
 > 存储键（@system.storage）只用来放「版本号 / 当前周 / 上次同步时间 / 同步地址」四个小标志，
 > 因为该 API 官方限制单值小于 128 字节。
@@ -307,9 +315,9 @@ hapMode: (!this.targetService.isDebug()).toString()
 
 | 构建 | app.js | pages/index/index.js | 结果 |
 | --- | --- | --- | --- |
-| debug（默认） | 72,110 B | 47,837 B | app.js **超闸 22,958 B**（结构性） |
-| -p buildMode=release | **42,327 B**（余 6,825） | **29,144 B**（余 20,008） | 两者合规 |
-| release 包内 .bc | 35,872 B | 24,102 B | 字节码路径同样合规 |
+| debug（默认） | 69,677 B | 42,896 B | app.js **超闸 20,525 B**（结构性） |
+| -p buildMode=release | **40,702 B**（余 8,450） | **26,070 B**（余 23,082） | 两者合规 |
+| release 包内 .bc | 34,572 B | 21,854 B | 字节码路径同样合规 |
 
 ### 每次打包后请跑守门脚本
 
@@ -320,8 +328,8 @@ powershell -ExecutionPolicy Bypass -File tools/check-lite-size.ps1
 输出示例：
 
 ```
-[ OK ] app.js = 42327 B, 6825 B of headroom
-[ OK ] pages\index\index.js = 29144 B, 20008 B of headroom
+[ OK ] app.js = 40702 B, 8450 B of headroom
+[ OK ] pages\index\index.js = 26070 B, 23082 B of headroom
 All .js artifacts are inside the real-device per-file hard limit.
 ```
 
@@ -340,10 +348,10 @@ NexioWatch/
 │       ├── config.json                 # 模块、设备类型、页面注册、权限声明
 │       ├── resources/base/             # 应用图标与字符串
 │       └── js/MainAbility/
-│           ├── app.js                  # 入口：import 全部 common -> globalThis.NEXIO
+│           ├── app.js                  # 入口：import 全部 common -> $app.data.NEXIO
 │           ├── common/                 # 内核（见「架构设计 · 模块划分」）
 │           │   ├── const.js  model.js  store.js  sync.js  ble.js
-│           │   ├── date.js   holiday.js  ui.js   i18n.js  icon.js  seed.js
+│           │   ├── date.js   holiday.js  ui.js   i18n.js  icon.js  defaults.js
 │           │   └── img/app_icon.png
 │           ├── pages/index/            # 唯一页面
 │           │   ├── index.hml           # 3 行：一张 canvas + 5 个事件绑定
@@ -381,6 +389,9 @@ NexioWatch/
 | 12 | 圆屏：任何版式都可能被圆形裁掉 | 所有内容落在弦 [227 - sqrt(227^2 - dy^2), 227 + sqrt(227^2 - dy^2)] 内 |
 | 13 | 运行时是 **JerryScript**，只保证 ES5 | 禁 let / const / 箭头函数 / 模板串 / async / await / Promise / class / 展开 / 可选链 |
 | 14 | 订阅必须有取消路径，定时器必须有清理 | onDestroy 清 setInterval，clearMonitorForCrownEvents() |
+| 15 | **真机没有 globalThis**（引擎只在 JSFWK_TEST==1 的模拟器里创建）。入口写 globalThis.X = ... ⇒ 真机求值即 ReferenceError：**全黑屏但不重启**，无任何日志 | 跨文件共享只走 $app / getApp().data / @system.*；getApp() 在顶层调用一次并缓存（反复调用会触发 JS REF LIMIT） |
+| 16 | ViewModel(options) 只保留 render / data / styleSheet 与**函数**成员，其它 key 静默丢弃 | app.js 要发布的对象必须挂在 export default { data: { ... } } 上 |
+| 17 | canvas 没有 drawImage / clip，位图只能自己填矩形 | 图标量化为调色板 + 整行 RLE 点阵；要做圆形就把圆形构图烘进点阵（圆外纯黑） |
 
 ---
 
@@ -394,10 +405,13 @@ NexioWatch/
 ### 已实现但**尚未在真机验证**的项
 
 - **真机安装必须使用 release 构建**（见上文硬闸），且本仓库未附签名配置
+- **内核通道**：getApp().data.NEXIO 在真机上是否可用（模拟器走的已是同一条主通道，但真机未经证实）
+- **桌面图标是否为圆形、桌面显示名是否为 Nexio**（均编译期生效，需真机确认）
+- **未同步前的空态**：首页 / 周课表 / 同步页在无数据时的文案与版式
 - **表冠**：GT5 / GT6 是否具备表冠、event.degree 的方向与灵敏度、16 度每档的手感
 - **canvas 字号写法**在真机字体回退链下的表现（若真机字号异常，优先怀疑 ctx.font 是否带了族名）
 - **@system.app.terminate()** 是否真正结束应用（失败时会提示「本机不支持退出」）
-- **@system.file 与 @system.storage**：rawfile 读取、内部文件写入、四个小标志读写
+- **@system.file 与 @system.storage**：内部文件读写与四个小标志（rawfile 种子文件已随种子数据一并移除）
 - **蓝牙广播扫描**：能否收到手机端广播、data 是明文还是十六进制
 - **局域网 HTTP 拉取**：GET /schedule.json?week=N 的端到端联调
 - **振动**：权限弹窗、时长、强度
@@ -411,8 +425,14 @@ NexioWatch/
 ## 常见问题
 
 **Q：装到手表上是全黑屏，什么都没显示？**
-A：九成是 48 KB 硬闸 —— 你装的是 debug 包。请用 -p buildMode=release 重新打包，并跑 tools/check-lite-size.ps1。
-真机对超限文件是**硬拒绝**（该文件一行都不执行），而模拟器只打 WARN。
+A：先看现象 —— **黑屏但手表没软重启**，两个常见原因：
+
+1. **48 KB 硬闸**：你装的是 debug 包（debug 构建永不压缩）。请用 -p buildMode=release 重新打包，
+   并跑 tools/check-lite-size.ps1。真机对超限文件是**硬拒绝**（该文件一行都不执行），模拟器只打 WARN。
+2. **入口用了 globalThis**：真机没有 globalThis，入口求值即抛 ReferenceError。本项目已改为
+   export default { data: { NEXIO } } + 页面 getApp().data.NEXIO（见「引擎坑速查」第 15 条）。
+
+判断方法：模拟器能跑而真机黑屏 ⇒ 优先查第 1 条；真机连 onCreate 日志都没有 ⇒ 第 2 条。
 
 **Q：所有文字看起来都一样大，挤成一团？**
 A：ctx.font 带了字体族名。本引擎只有 '<size>px'（不带族名）才服从字号，详见「引擎坑速查」第 1 条。
@@ -420,12 +440,20 @@ A：ctx.font 带了字体族名。本引擎只有 '<size>px'（不带族名）�
 **Q：为什么只能看一周的课，不能翻周？**
 A：内存。整学期课表驻留 JS 堆会 ERR_OUT_OF_MEMORY 并软重启。手表端只保留当前周，翻周请用手机端。
 
+**Q：为什么设置页和作息页不见了？**
+A：已按使用反馈删除。作息时间表改由手机端随同步一起下发（times 字段），手表端不再自带示例数据；
+同步地址与手动同步并入「同步」页，导航胶囊的中间一枚也改成了「同步」。
+
+**Q：没同步之前打开，课表是空的？**
+A：是预期行为。手表端不再内置任何示例课程（种子数据已删除，避免占用内存与出现「别的周」的课），
+首次打开会显示「课表来自手机端同步」，同步一次后即为真实课表。
+
 **Q：为什么手表上不能添加或编辑课程？**
 A：设计如此。手表只负责「看」，录入与编辑全部在手机端完成。
 
 **Q：手机和手表怎么连？需要 Wear Engine 吗？**
 A：不需要。同一局域网下，手机端开 HTTP 服务，手表拉取；地址可以由蓝牙广播发现，也可以手动填。
-离线时还可以走 rawfile 与文件导入导出。
+离线时还可以走文件导入导出。
 
 **Q：构建日志报 Will skip sign？**
 A：没有配置签名，产物是 unsigned HAP。要装真机需先在 build-profile.json5 补 signingConfigs。
@@ -437,13 +465,16 @@ A：不一定。模拟器不复现 48 KB 硬闸，也不执行振动、蓝牙、
 
 ## 路线图
 
-- [x] 单页 canvas 架构与八个内部视图
+- [x] 单页 canvas 架构与六个内部视图
 - [x] 局域网 HTTP 同步、蓝牙地址发现、文件通道
 - [x] 只缓存当前周（内存控制）
 - [x] 活动记录式首页、方向跟手转场、表冠交互
 - [x] 手表端彻底去编辑（只读）
 - [x] 真机 48 KB 硬闸的架构应对（内核分离 + release 构建）
-- [ ] **真机签名包实测**（安装、渲染、字体、内存）
+- [x] 真机黑屏根因修复（去 globalThis，改 $app.data 通道）
+- [x] 圆形应用图标（桌面 PNG + 关于页点阵）
+- [x] 删除设置页与作息页、去掉种子数据（全部依赖手机端同步）
+- [ ] **真机签名包实测**（安装、渲染、字体、内存、getApp 通道）
 - [ ] 表冠方向与灵敏度标定
 - [ ] 真机蓝牙、HTTP、振动、@system.file 联调
 - [ ] 64 KB 档机型（GT2 等）回归

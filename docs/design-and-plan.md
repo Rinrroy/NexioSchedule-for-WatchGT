@@ -638,3 +638,45 @@ if (!store.dataIsCurrentWeek()) {
 | 14 | **退出行为的真机验证**：`@system.app.terminate()` 在 GT5/GT6 是否真正结束应用；失败时会提示 `本机不支持退出` | 是（真机 API） | 与 §7 待办 7 一起做 |
 
 - M12 第四轮：m06685 四项（首页对称与信息四行 / 关于页完整与按钮可分 / 周课表只读当周 / 过渡跟手）+ 引擎字号族缺陷定位与全量修复 + 宽度模型重标定 —— **完成（模拟器抓帧逐项核验；真机判据见 §11.4）**
+
+## 12. 第五轮（2026-10-09）：真机黑屏根因与瘦身（m08330）
+
+用户反馈（逐字）：「再说几个问题，不要动UI，去解决一下，实机安装打开应用黑屏但不软重启，我猜是内存问题，手表端的图标应该为圆形，包括关于页面，程序在手表端被称为lable而不是Nexio其次设置页面，作息页面都可以不要，全部接受同步手机，以免内存溢出」。**硬约束：不动 UI 版式**（本轮只改数据通道、图标、显示名与页面集合，版式坐标一律未动）。
+
+### 12.1 反馈与处置
+
+| # | 反馈 | 处置 |
+| --- | --- | --- |
+| ① | 真机安装后黑屏，但不软重启（用户猜内存） | **不是内存**。根因：ACE-Lite 只在 `JSFWK_TEST==1`（仅模拟器）时创建 `globalThis`（`js_app_environment.cpp:82-89`）⇒ 真机求值 `globalThis.NEXIO` 抛 `ReferenceError`，app.js 与页面都不执行 ⇒ 无 `onCreate`、整屏黑、不软重启。修法：内核改由 `export default { data: { NEXIO } }` 发布（`js_ability_impl.cpp:80-82` + `js_app_context.cpp:182-191` ⇒ 全局 `$app`），页面三通道取用 `getApp().data.NEXIO` → `$app.data.NEXIO` → `globalThis.NEXIO` |
+| ② | 图标应为圆形（桌面 + 关于页） | 桌面 `icon.png`/`icon_small.png` 重制为圆形 PNG（圆外 `alpha=0`）；关于页 `ICON32` 重写为圆形 32 色点阵（canvas 无 `drawImage`/`clip`，只能把圆形构图烘进点阵） |
+| ③ | 手表端显示名为 `lable` | `string.json` 的 `MainAbility_label` 由 `"label"` 改为 `"Nexio"` |
+| ④ | 设置页、作息页都不要 | `PAGE_ORDER`/`drawView`/`crownTurn`/`drawTimes`/`drawSettings`/`doStep`/`step`/`reset` 全部删除；`nav()` 中间胶囊改「同步」（新增 `btn_sync`）；首页胶囊改「今日/周/i」；今日页环区热区与首页右滑改指向同步页 |
+| ⑤ | 全部接受手机同步，以免内存溢出 | 删 `common/seed.js`（12 门示例课 + 2 条示例假期）；新建 `common/defaults.js`（空设置 + 标准作息表）；`store.js` 的 `loadSeed` 与 `setCurrentWeek`/`setTotalWeeks` 一并删除；同步页删「恢复示例数据」行 |
+
+### 12.2 引擎约束（本轮新增，写 Lite 代码必须遵守）
+
+- **真机没有 `globalThis`**：只有 `JSFWK_TEST==1`（`frameworks/targets/simulator/acelite_config.h:28-29`，或 `LOSCFG_TEST_JS_BUILD`）才有。跨文件共享状态的可用通道只有：`$app`（`ATTR_APP`，引擎在 app 求值时挂的全局）、`getApp().data.*`（`app_data_module.cpp`，引擎内置全局函数）、或 `@system.*` 模块。
+- `ViewModel(options)`（`runtime-core/src/core/index.js:34-95`）只保留 `render`/`data`/`styleSheet` 与**函数**成员，其它 key 静默丢弃 ⇒ app.js 里塞自定义对象必须走 `data`。
+- `getApp()` **只在顶层调用一次并缓存**：引擎注释警告每次调用会丢一次 `$app` 引用，反复调用触发 `ERR_REF_COUNT_LIMIT`（「JS REF LIMIT」）。
+- `import x from '@system.app'` 是构建期被 ace-loader 转成 `requireNative('system.app')`（产物里可见 `requireModule("@system.app")`），写法无需改。
+- 页面与 app.js **各享一份 49,152 B 配额**（`js_fwk_common.h:89`，按文件判定）；debug 构建永不压缩（`legacy-compile-lite-node.js` 的 `isDebug()` → `hapMode`），所以 `app.js` debug 超闸是结构性的，真机必须装 release 包。
+
+### 12.3 尺寸（本轮两次构建）
+
+| 构建 | `app.js` | `pages/index/index.js` | 49,152 B 闸 |
+| --- | --- | --- | --- |
+| debug | 69,677 B | 42,896 B | app.js 超闸 -20,525；页面 +6,256 |
+| `-p buildMode=release` | **40,702 B** | **26,070 B** | +8,450 / +23,082；`app.bc` 34,572 / `index.bc` 21,854 亦合规 |
+
+`tools/check-lite-size.ps1`：release `exit 0` / debug `exit 1`。页面 bundle debug 由 47,837 → 42,896 B（删两页与相应代码）。release 产物仍是 unsigned（`build-profile.json5` 无 `signingConfigs`）。
+
+### 12.4 待办增量（接 §7 与 §11.4）
+
+| # | 事项 | 阻断项 | 备注 |
+| --- | --- | --- | --- |
+| 15 | **真机核验内核通道**：`getApp().data.NEXIO` 在 GT5/GT6 上是否可用（模拟器验证走的就是这条主通道，但不等于真机） | 是（真机） | 若真机仍黑屏，用 `hdc` 抓 hilog 找 `ReferenceError` / @@EXCE_ACE_PAGE_JS_EVAL_FAILED` |
+| 16 | **真机核验圆形图标与 5 位以下显示名**：桌面图标是否为圆、名称是否为 `Nexio` | 是（真机） | 显示名来自 `string.json`，编译期生效 |
+| 17 | **真机核验空态**：未同步时首页/周课表/同步页的空态文案与手机端首次同步后的填充 | 是（真机） | 已删种子数据，未同步前课表为空是预期行为 |
+| 18 | 真机签名包：`build-profile.json5` 配 `signingConfigs`（DevEco 自动签名需华为开发者账号） | 是（账号） | 与 §7 第 12 条同源 |
+
+- **M13 第五轮：真机黑屏根因（globalThis 缺失）定位与修复 + 圆形图标 + 显示名 Nexio + 删设置/作息页 + 去种子全走手机同步 + debug/release 双构建与抓帧回归 —— 完成（模拟器侧；真机判据见 §12.4）**

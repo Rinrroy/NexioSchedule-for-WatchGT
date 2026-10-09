@@ -1,5 +1,5 @@
 /*
- * NexioWatch - 原项目图标(NexioSchedule 启动图标)的 canvas 点阵数据
+ * NexioWatch - 应用图标（圆形）的 canvas 点阵数据
  *
  * 为什么需要这个文件：
  *   ACE-Lite 的 canvas 没有 drawImage / createImageBitmap / Image 对象，
@@ -7,13 +7,22 @@
  *   因此把图标预先编码成"每行 RLE"字符串常量，运行时用 ctx.fillRect 逐行还原，
  *   只占一个 canvas 节点，且不用任何图片解码器。
  *
- * 数据来源：
- *   common/img/app_icon.png (96x96 RGBA, 由 NexioSchedule 的 nexio_schedule.webp 转出)
- *   生成链路：PNG -> RGBA -> 黑色底 alpha_composite(透明角变纯黑) -> LANCZOS resize
- *            -> quantize(16 色, MAXCOVERAGE) -> 每行 RLE
- *   生成脚本：.dsh-tmp/gen_icon24.py + .dsh-tmp/gen_iconjs.py (不进源码目录)
+ * 圆形（m08330「手表端的图标应该为圆形，包括关于页面」）：
+ *   桌面图标是真正的圆形 PNG（白色圆盘 + 内嵌 logo，圆外 alpha=0）；
+ *   关于页的点阵则把同样的圆形构图先合成到黑底上再编码 —— 圆外是纯黑，
+ *   画在黑底画布上视觉上就是圆形（Lite canvas 没有 clip，这是唯一可行做法）。
  *
- * pal 格式：16 个调色板颜色，每个 6 位小写十六进制('rrggbb')，拼接后长度恒为 96。
+ * 数据来源：
+ *   NexioSchedule/app/src/main/res/mipmap-xxxhdpi/nexio_schedule.webp (192x192 RGBA)
+ *   生成链路：裁出彩色 logo 本体 (33,33)-(158,158)
+ *            -> 合成到 32x32 的白色圆盘内(占比 0.86，抗锯齿椭圆掩码)
+ *            -> 黑底 alpha_composite -> 近黑像素归零
+ *            -> 24 位色彩空间里按「频次 x 饱和度」+ 最小色距挑选 32 色调色板
+ *            -> 每行 RLE
+ *   生成脚本：.dsh-tmp/mkicon7.py + .dsh-tmp/mkicon8.py (不进源码目录)
+ *   实测：32 色 meanErr 4.35、vivid 17；16 色只剩 1 个鲜艳色（logo 会发灰），故取 32 色。
+ *
+ * pal 格式：调色板颜色按 'rrggbb' 拼接，长度 = 颜色数 * 6。
  *   调色板索引 i 的颜色 = '#' + pal.substr(i * 6, 6)。
  *
  * enc 格式(每套 n 行)：
@@ -52,16 +61,19 @@
 var ALPHA = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 var ICON32 = {
   n: 32,
-  pal: '000000fffffffd69115557ede770b26e6e6eb1b5f1fb9f60ad55f2f7c9aca6a6a6e8a0dd8e86f0f59a97f7d7e1ed6c80',
+  pal: '000000ffffffd6d6d6fd6b15636363fc863c9545fa6b54f0f37568bc51d8ea6a99a6a6a6b47cf8fcb786de6dc6f196b7d2a0fb9da2ecf8cbb08b8b8bfdfdfdfdfffffcfffffefefefafafafdfbfafefffffffffefffffbfd6c17fd6e19fd6f1a',
   enc:
-    'Af~Af~Af~ADFAKVFAAD~'
-    + 'ACFABXFAAC~ACKABXKAAC~ACKABXKAAC~ACKABXKAAC~'
-    + 'ACKABDJAHACBHFPBNAEBOABDKAAC~ACKABCJACGHBPCEDOABCKAAC~ACKABCHACGHAPCEELABCKAAC~ACKABCHACBHENDLCEAIALABCKAAC~'
-    + 'ACKABCHACAJABLOAIALABCKAAC~ACKABCHACAOABLOAIBBCKAAC~ACKABCHACAOABAJANDLEBBIBBCKAAC~ACKABCHACAOABANAPANBECLAEALABBIAMABCKAAC~'
-    + 'ACKABCHACAOABMIAMABCKAAC~ACKABCHACAOABMIAMABCKAAC~ACKABCNAHAOABAOALEBFIAMABCKAAC~ACKABCNAPAOABALAEDLABFMBBCKAAC~'
-    + 'ACKABCNAPAOABMDAMABCKAAC~ACKABCNAPAOABLOADAMABCKAAC~ACKABCOAPAEALGGEMADAGABCKAAC~ACKABDLAECIHDCGABDKAAC~'
-    + 'ACKABEONBEKAAC~ACKABXKAAC~ACKABXKAAC~ACFABXFAAC~'
-    + 'ADFAKVFAAD~Af~Af~Af'
+    'AKEALACAYABBYACALAEAAK~AITAYABJYATAAI~AGTAYABBYCUDYCBBYATAAG~AFCABAZAYBZJYBZABACAAF~' +
+    'AECABAYAWAVKaCXAYABACAAE~ADCABAYASANJSFCAYABACAAD~ACCABASAFADAeAfFFCICKCOBCABACAAC~' +
+    'ABTABAYAFAeAFIIDKCODYABATAAB~ABYBSAdAfBFGIDKCODJAQAUAYAAB~AALABAYANAeAFAfEFCICKCOEJAQAYABALAAA~' +
+    'AAYAUAWANAfBFANCSICDQAJBQAZAXAYAAA~EABAYAWANAfAFASAYQMAJAQAcAYABAEA~LAXAYAWANAfAFAYCWFUFZAYBMAJAQAcAYAXALA~' +
+    'CABAYAWANAfAFAYAVAZAYACAYKXAYAMAGAQAcAYABACA~YABAZAWASAfAFAYAaACAFAICKCODJACABAYAMAGAQAcAUABAYA~' +
+    'BBZAWASAfAFAYAaAYANBPGOAQBCAXAYAMAGAQAcAUABB~BBZAWASAfAFAYAVAYNUAYAMAGAQAcAUABB~' +
+    'YABAZAWASAfAIAYAVAZAYMUAYAMAGARAcAUABAYA~CABAYAWASAFAIAYAVAXBUEXAbAUFYAMAGARAcAYABACA~' +
+    'LAXAYAWASAFAIAYAaAYAPCODCABAZAUDYAMAHARAcAYAXALA~EABAYAWASAIBYAaAYAKAOEJAQAbAUEYAMAHARAcAYABAEA~' +
+    'AAYAUAWASAIAKAYAVAYACAYECAYAUFYAMAHARAcAXAYAAA~AALABAYASAIAKAYAUAYIUFYARAHARAYABALAAA~' +
+    'ABYBSAIAKACABGbIYAHBRAZAYAAB~ABTABACAKBPBQNRBHBCABATAAB~ACCABASAKAOCJEGEHFRABACAAC~ADCAZACAPBQFMFRDCAYACAAD~' +
+    'AECABAYRBACAAE~AFCABAYPBACAAF~AGTAYABBYBZAXDZBYABBYATAAG~AITAYABJYATAAI~AKEALACAYABBYACALAEAAK'
 };
 
 export { ALPHA, ICON32 };

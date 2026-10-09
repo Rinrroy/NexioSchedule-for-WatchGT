@@ -12,13 +12,14 @@
  *
  * 操作逻辑（按 m04325 要求，仿华为自带“活动记录”）：
  *   首页 home = 大环 + 当前/下一节课状态，打开即看到“现在上什么课/下一节是什么”；
- *     上滑 -> 当日课表(today)，下滑 -> 周课表(week)，左滑 -> 关于(about)，右滑 -> 设置(settings)；
+ *     上滑 -> 当日课表(today)，下滑 -> 周课表(week)，左滑 -> 关于(about)，右滑 -> 周课表(week)；
  *     左右上下四个方向之外的方向不动作；底部保留三枚快捷胶囊，便于点击直达。
  *   子页面：右滑 / 胶囊“返回” -> back()；表冠顺时针 forward 语义统一见 crownTurn()。
  *   过渡方向严格跟手：左滑/上滑一律 d=+1（新页自右/下方进入），右滑/下滑 d=-1（m06685）。
  *
  * 内存（按 m04325 要求）：只缓存“当前周”的课（store.dataWeek 标记数据归属周），
- * 手机端整学期课表在 sync.parse 里按周过滤后才入库，默认上限 MAX_COURSES=12 门。
+ * 手机端整学期课表在 sync.parse 里按周过滤后才入库，默认上限 MAX_COURSES 门
+ * （common/const.js 定义）。设置页与作息页已按 m08330 整体删除，课表与作息只由手机端下发。
  *
  * 版式与动效依据：
  *  - ui-ux-pro-max / miuix：深色底 + 圆角卡片 + 单一强调色；正文 14-15px、次要 12-13px；
@@ -42,11 +43,34 @@
  * 真机单文件硬闸：Lite 引擎对「每个 .js 文件」限长 49,152 B
  * （frameworks/src/core/base/js_fwk_common.h:89 FILE_CONTENT_LENGTH_MAX = 1024*48，
  *  超限时真机分支直接 return false → 页面零执行、整屏黑）。
- * app.js 与页面各自独立配额，故把 common 全部内核模块放在 app.js 顶层
- * 发布到 globalThis（实测页面模块顶层可读，且 app.js 先于页面执行），
+ * app.js 与页面各自独立配额，故把 common 全部内核模块放在 app.js 顶层，
+ * 经 app VM 的 data 通道发布给页面（app.js 的 export default.data.NEXIO）。
  * 本页不再 import 任何 common，页面 bundle 只含本页代码。
  * ------------------------------------------------------------------------- */
-var K = globalThis.NEXIO;
+/* 内核取用（m08330 真机黑屏修复）：
+ *   真机没有 globalThis —— 引擎只在 #if (JSFWK_TEST == 1) 时才把它挂到全局对象上
+ *   （js_app_environment.cpp:85-89），而 JSFWK_TEST=1 只定义在模拟器的
+ *   acelite_config.h:28-29。旧写法 var K = globalThis.NEXIO 在真机求值就抛
+ *   ReferenceError，页面 eval 直接失败 → 整屏黑、连 onCreate 都不打。
+ *   三条通道按可用性依次尝试：
+ *     1) getApp()  —— AppDataModule 注册的全局函数（app_data_module.cpp:25-68），
+ *        0 参调用返回 app VM；该实现要求 app VM 上有 data 属性，否则返回 undefined。
+ *     2) $app      —— 引擎在 app 求值后挂到全局对象上（js_app_context.cpp:182-191）。
+ *     3) globalThis —— 仅模拟器兜底。
+ *   getApp() 只在模块顶层调用一次并缓存：引擎注释警告每次调用都会动引用计数，
+ *   反复调用会走到 ERR_REF_COUNT_LIMIT（JS REF LIMIT）。
+ *   typeof 对未声明的标识符不抛错，这是下面这段能在真机跑完的关键。 */
+var K = null;
+try {
+  if (typeof getApp === 'function') {
+    var APP = getApp();
+    if (APP && APP.data) K = APP.data.NEXIO;
+  }
+} catch (e) { K = null; }
+if (!K) {
+  try { if (typeof $app !== 'undefined' && $app && $app.data) K = $app.data.NEXIO; } catch (e2) { K = null; }
+}
+if (!K && typeof globalThis !== 'undefined') K = globalThis.NEXIO;
 var store = K.store;
 var M = K.M;
 var D = K.D;
@@ -125,7 +149,7 @@ var WEEK_NAME_W = 235;   /* 课名最大宽度：日期列左端(378-35=343) 再
 var WEEK_DATE_R = 382;   /* 日期右对齐：墨迹右端 378，仍在弦内 */
 
 /* 一级页面顺序（表冠 / 左右滑动按此顺序前后翻页） */
-var PAGE_ORDER = ['home', 'today', 'week', 'times', 'sync', 'settings', 'about'];
+var PAGE_ORDER = ['home', 'today', 'week', 'sync', 'about'];
 
 /* 当日课表可见卡片数（其余靠表冠 / 竖向拖拽滚动） */
 var TODAY_VISIBLE = 3;
@@ -297,16 +321,7 @@ export default {
       }
       return;
     }
-    if (this.view === 'times' && this.scrollRows > 0) {
-      var next = this.scrollTopRow + dir;
-      if (next < 0) next = 0;
-      if (next > this.scrollRows) next = this.scrollRows;
-      if (next !== this.scrollTopRow) {
-        this.scrollTopRow = next;
-        this.redraw();
-        return;
-      }
-    }
+    /* 作息页已删除（m08330）：表冠在今日页只做滚行与换日 */
     if (this.view === 'today') { this.aDate = D.addDays(this.aDate, dir); this.redraw(); return; }
     /* 周课表只呈现“当前周”：不再支持换周查看（m06685 明确要求删掉查看功能） */
     /* 子页面：向前（右滑 / 表冠顺时针）等于返回，向后不动作 —— 与旧版已验证的
@@ -402,9 +417,7 @@ export default {
     else if (v === 'today') this.drawToday(ctx);
     else if (v === 'week') this.drawWeek(ctx);
     else if (v === 'detail') this.drawDetail(ctx);
-    else if (v === 'times') this.drawTimes(ctx);
     else if (v === 'sync') this.drawSync(ctx);
-    else if (v === 'settings') this.drawSettings(ctx);
     else this.drawAbout(ctx);
   },
 
@@ -508,8 +521,10 @@ export default {
      中心间距 65（=±65），左端 108 / 右端 346，四边留白对称（m06685 反馈“右侧点
      没和边框对齐、左右不对称”）。 */
   nav(ctx) {
-    var labels = [t('btn_week'), '设置', t('btn_info')];
-    var targets = ['week', 'settings', 'about'];
+    /* 设置页已删除（m08330）：中间那枚改为「同步」。同步地址 / BLE 发现手机端 /
+       文件导入导出都要在这里操作，删掉设置页后必须有别的入口，否则首次配对无处可去。 */
+    var labels = [t('btn_week'), t('btn_sync'), t('btn_info')];
+    var targets = ['week', 'sync', 'about'];
     var w = 60;
     var gap = 5;
     var x0 = (W - (w * 3 + gap * 2)) / 2;
@@ -764,8 +779,8 @@ export default {
 
     /* 与子页 nav() 完全同轴（宽 60 / 间距 5 / 中心 162.5·227·291.5），
        这样首页胶囊和子页胶囊在同一视觉列上（m06685：左右要对称） */
-    var labels = [t('btn_day'), t('btn_week'), '设置'];
-    var targets = ['today', 'week', 'settings'];
+    var labels = [t('btn_day'), t('btn_week'), t('btn_info')];
+    var targets = ['today', 'week', 'about'];
     var w = 60;
     var gap = 5;
     var x0 = (W - (w * 3 + gap * 2)) / 2;
@@ -824,7 +839,8 @@ export default {
     ctx.fillStyle = C_TEXT2;
     ctx.font = '13px';
     UI.ltext(ctx, total > 0 ? ('今日课程 ' + done + ' / ' + total + ' 节已完成') : t('no_class'), 108, this.textY(140, 13));
-    this.reg(40, 98, 254, 56, 'open', 'settings');
+    /* 环区热区原来跳设置页；设置页已删除（m08330），改为跳同步页（数据只来自手机同步） */
+    this.reg(40, 98, 254, 56, 'open', 'sync');
     this.chip(ctx, t('btn_refresh'), 314, 111, 84, 30, true);
     this.reg(314, 111, 84, 30, 'sync', 0);
 
@@ -1034,56 +1050,7 @@ export default {
     this.footerBack(ctx, t('btn_back'), 'back', 0);
   },
 
-  /* ---------------- 作息（表冠 / 拖拽滚动） ---------------- */
-
-  drawTimes(ctx) {
-    var st = store.get();
-    var m = st.settings.morningSections;
-    var a = st.settings.afternoonSections;
-    var total = m + a + st.settings.eveningSections;
-    this.title(ctx, '作息时间', 46);
-    this.subtitle(ctx, st.settings.scheduleName + ' · 共 ' + total + ' 节', 68);
-
-    var colors = ['#4CAF50', '#2196F3', '#AB47BC'];
-    var pitch = 38;
-    var rowH = 34;
-    var top = 88;
-    var visible = 6;
-    this.scrollRows = total > visible ? total - visible : 0;
-    if (this.scrollTopRow > this.scrollRows) this.scrollTopRow = this.scrollRows;
-    if (this.scrollTopRow < 0) this.scrollTopRow = 0;
-
-    var i;
-    for (i = 1; i <= total; i++) {
-      var slot = i - 1 - this.scrollTopRow;
-      if (slot < 0 || slot >= visible) continue;
-      var period = i <= m ? 0 : (i <= m + a ? 1 : 2);
-      var y = top + slot * pitch;
-      ctx.fillStyle = C_SURFACE;
-      UI.roundRect(ctx, ROW_X, y, ROW_W, rowH, 9);
-      ctx.fillStyle = colors[period];
-      UI.rect(ctx, ROW_X + 10, y + 8, 3, 18);
-      ctx.fillStyle = C_TEXT;
-      ctx.font = '14px';
-      UI.ltext(ctx, '第 ' + i + ' 节', ROW_X + 24, this.baseY(y, rowH, 14));
-      var v = st.sectionTimes[String(i)];
-      this.rtext(ctx, v ? v : '未设置', ROW_X + ROW_W - ROW_PAD, this.baseY(y, rowH, 13), 13, '#B9B9C0');
-    }
-
-    if (this.scrollRows > 0) {
-      var trackH = visible * pitch - (pitch - rowH);
-      ctx.fillStyle = '#2A2A2E';
-      UI.roundRect(ctx, W - 34, top, 3, trackH, 2);
-      var thumbH = Math.round(trackH * visible / total);
-      var span = trackH - thumbH;
-      var ratio = this.scrollRows > 0 ? this.scrollTopRow / this.scrollRows : 0;
-      ctx.fillStyle = '#5A5A62';
-      UI.roundRect(ctx, W - 34, top + Math.round(span * ratio), 3, thumbH, 2);
-      this.ctext(ctx, t('scroll_hint'), W / 2, this.textY(340, 11), 11, C_DIM2);
-    }
-    this.footerBack(ctx, t('btn_back'), 'back', 0);
-  },
-
+  /* ---------------- 同步 ---------------- */
   /* ---------------- 同步 ---------------- */
 
   drawSync(ctx) {
@@ -1095,10 +1062,11 @@ export default {
       ['立即同步', this.syncLabel()],
       ['蓝牙发现手机端', this.bleLabel()],
       ['导入内部文件', ''],
-      ['导出到内部文件', ''],
-      ['恢复示例数据', '']
+      ['导出到内部文件', '']
     ];
-    var acts = ['editHost', 'syncNow', 'bleScan', 'importFile', 'exportFile', 'reset'];
+    /* 「恢复示例数据」已删除（m08330）：表端只读、数据只来自手机同步，
+       种子课表正是内存溢出与「看到别的周课程」的源头。 */
+    var acts = ['editHost', 'syncNow', 'bleScan', 'importFile', 'exportFile'];
     var i;
     for (i = 0; i < items.length; i++) {
       var y = 88 + i * 37;
@@ -1115,51 +1083,7 @@ export default {
     this.footerBack(ctx, t('btn_back'), 'back', 0);
   },
 
-  /* ---------------- 设置 ---------------- */
-
-  drawSettings(ctx) {
-    var st = store.get();
-    var total = st.settings.morningSections + st.settings.afternoonSections + st.settings.eveningSections;
-    this.title(ctx, '设置', 46);
-    this.subtitle(ctx, st.settings.scheduleName, 68);
-    var rows = [
-      ['当前周', '' + st.settings.currentWeek, 'stepWeek'],
-      ['总周数', '' + st.settings.totalWeeks, 'stepTotal'],
-      ['作息时间', '共 ' + total + ' 节', 'open:times'],
-      ['同步与导入', store.syncHostLabel() || '未设置', 'open:sync'],
-      ['关于', VERSION + ' · ' + HEAP_TIER_KB + 'KB', 'open:about']
-    ];
-    var i;
-    for (i = 0; i < rows.length; i++) {
-      var y = 88 + i * 37;
-      var h = 34;
-      ctx.fillStyle = C_SURFACE;
-      UI.roundRect(ctx, ROW_X, y, ROW_W, h, 11);
-      ctx.fillStyle = C_TEXT2;
-      ctx.font = '14px';
-      UI.ltext(ctx, rows[i][0], ROW_X + ROW_PAD, this.baseY(y, h, 14));
-      if (rows[i][2] === 'stepWeek' || rows[i][2] === 'stepTotal') {
-        var bw = 28;
-        var bh = 25;
-        var by = y + (h - bh) / 2;
-        var plusX = ROW_X + ROW_W - ROW_PAD - bw;
-        var minusX = plusX - bw - 78;
-        this.chip(ctx, '-', minusX, by, bw, bh, false);
-        this.reg(minusX, by, bw, bh, 'step', rows[i][2] === 'stepWeek' ? 1001 : 1002);
-        this.ctext(ctx, rows[i][1], (minusX + bw + plusX) / 2, this.textY(by + bh / 2, 14), 14, C_TEXT);
-        this.chip(ctx, '+', plusX, by, bw, bh, false);
-        this.reg(plusX, by, bw, bh, 'step', rows[i][2] === 'stepWeek' ? 1011 : 1012);
-      } else {
-        this.rtext(ctx, rows[i][1], ROW_X + ROW_W - ROW_PAD, this.baseY(y, h, 13), 13, C_DIM);
-        this.reg(ROW_X, y, ROW_W, h, rows[i][2].indexOf('open:') === 0 ? 'open' : rows[i][2], rows[i][2].indexOf('open:') === 0 ? rows[i][2].substring(5) : 0);
-      }
-    }
-    if (this.tip) {
-      this.ctext(ctx, this.tip, W / 2, this.textY(324, 13), 13, '#7BD389');
-    }
-    this.footerBack(ctx, t('btn_back'), 'back', 0);
-  },
-
+  /* ---------------- 关于 ---------------- */
   /* ---------------- 关于 ---------------- */
 
   drawAbout(ctx) {
@@ -1269,8 +1193,9 @@ export default {
        过渡方向必须跟手：新页从手指来的那一侧进入（m06685 反馈“上划却从别的方向出来”）。 */
     if (this.view === 'home') {
       if (Math.abs(dx) >= SWIPE_MIN && Math.abs(dx) > Math.abs(dy)) {
+        /* 设置页已删除（m08330）：右滑改成回到上一页（周课表） */
         if (dx < 0) this.jump('about', 1);
-        else this.jump('settings', -1);
+        else this.jump('week', -1);
       } else if (Math.abs(dy) >= SWIPE_MIN && Math.abs(dy) > Math.abs(dx)) {
         if (dy < 0) this.open('today', undefined, 1);
         else this.open('week', undefined, -1);
@@ -1318,12 +1243,10 @@ export default {
       this.redraw();
       return;
     }
-    if (a === 'reset') { store.loadSeed(); store.save(); this.tip = '已恢复示例数据'; this.redraw(); return; }
     if (a === 'editHost') { this.cycleHost(); return; }
     if (a === 'bleScan') { this.doBleScan(); return; }
     if (a === 'importFile') { this.doImport(); return; }
     if (a === 'exportFile') { this.doExport(); return; }
-    if (a === 'step') { this.doStep(v); return; }
   },
 
   /* ---------------- 业务动作 ---------------- */
@@ -1336,24 +1259,6 @@ export default {
       if (list[i].id === id) { this.detailCourse = list[i]; break; }
     }
     this.open('detail');
-  },
-
-  /* 表端只读：设置里只保留“当前周 / 总周数”两个可调项 */
-  doStep(code) {
-    var st = store.get();
-    var weekChanged = false;
-    if (code === 1001) { store.setCurrentWeek(st.settings.currentWeek - 1); weekChanged = true; }
-    else if (code === 1011) { store.setCurrentWeek(st.settings.currentWeek + 1); weekChanged = true; }
-    else if (code === 1002) { store.setTotalWeeks(st.settings.totalWeeks - 1); }
-    else if (code === 1012) { store.setTotalWeeks(st.settings.totalWeeks + 1); }
-    else return;
-    this.week = store.get().settings.currentWeek;
-    store.save();
-    this.redraw();
-    /* 手表只缓存“当前周”的课：周次一改，本地缓存就过期了。
-       若已配置同步地址就立刻重拉当周，避免用户看到上一周的课。
-       没配地址时首页会显示“缓存为第 N 周，请重新同步”的提示。 */
-    if (weekChanged && !store.dataIsCurrentWeek() && store.get().syncHost) this.doSync();
   },
 
   /* 蓝牙发现：扫描广播拿到手机端局域网地址，再走 HTTP 拉数据。

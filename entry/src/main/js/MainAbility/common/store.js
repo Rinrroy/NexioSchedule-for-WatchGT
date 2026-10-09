@@ -4,7 +4,7 @@
  * 持久化策略（受 lite API 限制驱动）：
  *   - @system.storage 单值 < 128 字节 -> 只放小标志（版本/当前周/同步时间/同步地址）；
  *   - 完整数据用 @system.file 写到 internal://app/nexio/schedule.json；
- *   - 任何一步失败都只降级（内存数据 / 内置种子），不抛异常、不白屏。
+ *   - 任何一步失败都只降级（保留内存里的上一份数据），不抛异常、不白屏。
  *
  * 同步地址（syncHost）是唯一允许写入 storage 的动态值：手机端局域网服务地址，
  * 形如 "10.0.2.2" 或 "10.0.2.2:8787"，长度远小于 128 字节。
@@ -20,12 +20,11 @@ import {
 } from './const.js';
 import * as M from './model.js';
 import * as D from './date.js';
-import * as SEED from './seed.js';
+import * as DEF from './defaults.js';
 import * as HOL from './holiday.js';
 
 function defaultSettings() {
-  var s = SEED.settings();
-  var t = SEED.times();
+  var s = DEF.settings();
   return {
     currentWeek: s.currentWeek,
     totalWeeks: s.totalWeeks,
@@ -43,14 +42,14 @@ var state = {
   fileOk: true,
   courses: [],
   holidays: [],
-  /* 当前 courses 属于哪一周（0 = 未知/内置示例）。
+  /* 当前 courses 属于哪一周（0 = 未知：还没从手机端同步过）。
      手表端只缓存一周的课，跨周后旧数据要能提示用户重新同步。 */
   dataWeek: 0,
   settings: defaultSettings(),
-  times: SEED.times(),
+  times: DEF.times(),
   sectionTimes: {},
   lastSync: 0,
-  source: '内置示例',
+  source: '未同步',
   selectedId: '',
   selectedDay: 0,
   lastError: '',
@@ -65,28 +64,6 @@ function refreshSectionTimes() {
     state.settings.morningSections,
     state.settings.afternoonSections
   );
-}
-
-function loadSeed() {
-  state.courses = [];
-  var list = SEED.courses();
-  var i;
-  for (i = 0; i < list.length && i < MAX_COURSES; i++) {
-    state.courses.push(M.normalizeCourse(list[i]));
-  }
-  state.settings = defaultSettings();
-  /* 内置示例的 currentWeek 是按「写死的那一天」算的，跟真实时钟会漂移。
-     这里用开学日重新推导一次，保证示例数据自洽（周次与日期永不打架）。 */
-  if (state.settings.termStart) {
-    state.settings.currentWeek = M.clamp(
-      naiveWeek(D.todayISO()), 1, state.settings.totalWeeks);
-  }
-  state.times = SEED.times();
-  state.holidays = HOL.normalize(SEED.holidays());
-  state.source = '内置示例';
-  state.dataWeek = state.settings.currentWeek;
-  state.lastError = '';
-  refreshSectionTimes();
 }
 
 function loadCourses(list) {
@@ -151,7 +128,6 @@ function dataWeekLabel() {
 
 function get() {
   if (!state.ready) {
-    loadSeed();
     state.ready = true;
     refreshSectionTimes();
   }
@@ -200,17 +176,6 @@ function remove(id) {
   }
   state.courses = out;
   if (state.selectedId === id) state.selectedId = '';
-}
-
-function setCurrentWeek(week) {
-  state.settings.currentWeek = M.clamp(M.toInt(week, 1), 1, state.settings.totalWeeks);
-}
-
-function setTotalWeeks(total) {
-  state.settings.totalWeeks = M.clamp(M.toInt(total, 18), 1, MAX_WEEKS);
-  if (state.settings.currentWeek > state.settings.totalWeeks) {
-    state.settings.currentWeek = state.settings.totalWeeks;
-  }
 }
 
 function setSyncHost(host) {
@@ -571,9 +536,9 @@ function syncHostLabel() {
 }
 
 export {
-  loadSeed, load, save, get, refreshSectionTimes,
+  load, save, get, refreshSectionTimes,
   select, selectDay, selectedCourse, courseById, upsert, remove,
-  setCurrentWeek, setTotalWeeks, setSyncHost,
+  setSyncHost,
   weekOfDate, dateOfWeekday, holidayName, isHoliday,
   dataIsCurrentWeek, dataWeekLabel,
   applyPayload, toJson, markSynced, syncUrl, syncHostLabel,
@@ -581,10 +546,9 @@ export {
 };
 
 export default {
-  loadSeed: loadSeed, load: load, save: save, get: get, refreshSectionTimes: refreshSectionTimes,
+  load: load, save: save, get: get, refreshSectionTimes: refreshSectionTimes,
   select: select, selectDay: selectDay, selectedCourse: selectedCourse, courseById: courseById,
   upsert: upsert, remove: remove,
-  setCurrentWeek: setCurrentWeek, setTotalWeeks: setTotalWeeks,
   setSyncHost: setSyncHost,
   weekOfDate: weekOfDate, dateOfWeekday: dateOfWeekday,
   holidayName: holidayName, isHoliday: isHoliday,

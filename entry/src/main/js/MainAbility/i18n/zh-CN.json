@@ -20,6 +20,7 @@
     "btn_week": "周",
     "btn_info": "i",
     "btn_day": "今日",
+    "btn_sync": "同步",
     "home_hint": "上滑今日课表 · 左滑关于",
     "home_next": "下一节",
     "home_cached_week": "缓存为{n}，请重新同步",

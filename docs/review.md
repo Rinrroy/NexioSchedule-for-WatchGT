@@ -501,3 +501,63 @@
 - 静态：`$app` / `sans-serif` / `pageDots` / `DOT_X` / `RING_FRAME` / `TODAY_Y0` / `viewIndex` / `repaint(` / `startRingAnim` / `stopRingAnim` / `pickDay` 全项目 **0 命中**；页面与 `common/ui.js` `node --check` 通过。
 - 独立性：docs-writer 与 verifier teammate 本轮仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。
 
+## 第五轮（2026-10-09）：真机黑屏根因（globalThis）+ 圆形图标 + 显示名 + 删设置/作息页 + 全走手机同步
+
+用户反馈（逐字）：「再说几个问题，不要动UI，去解决一下，实机安装打开应用黑屏但不软重启，我猜是内存问题，手表端的图标应该为圆形，包括关于页面，程序在手表端被称为lable而不是Nexio其次设置页面，作息页面都可以不要，全部接受同步手机，以免内存溢出」⇒ 五项 + 一条硬约束（不动 UI 版式）。
+
+### ① 真机黑屏：根因是 globalThis，不是内存
+
+| 事实 | 出处 |
+| --- | --- |
+| `jerry_init(JERRY_INIT_EMPTY)` 之后**只有 `#if (JSFWK_TEST == 1)` 才把 `globalThis` 挂到全局对象** | `frameworks/src/core/context/js_app_environment.cpp:82-89` |
+| `JSFWK_TEST=1` 只由 `frameworks/BUILD.gn:184-186`（`if (LOSCFG_TEST_JS_BUILD)`）与 `frameworks/targets/simulator/acelite_config.h:28-29` 定义 | 同上 |
+| 全 `.lite_research` 树 `globalThis` 仅 3 处命中，全在 `js_app_environment.cpp:86-88` | grep |
+| 旧代码 `app.js:23 globalThis.NEXIO = {...}`、`pages/index/index.js:49 var K = globalThis.NEXIO;` | — |
+
+⇒ 真机（`JSFWK_TEST != 1`）没有 `globalThis`，`app.js` 求值即 `ReferenceError`：无 `onCreate` 日志、整屏黑、**不软重启**（与用户描述吻合）。模拟器因 `JSFWK_TEST=1` 一直正常，所以此前测不出来。**与内存无关**。
+
+修法（双通道 + 兜底）：
+
+- `app.js`：`var NEXIO = {...}`（14 键，键名不变）→ `export default { data: { NEXIO: NEXIO }, onCreate(){...}, onDestroy(){...} }`。依据：`runtime-core/src/core/index.js:34-95 ViewModel()` 只认 `render`/`data`/`styleSheet` 与函数成员；`initState` 在 `__appVing__` 为真时直接 `vm.data = data`（`:80-84`）；`js_ability_impl.cpp:80-82` 在 app 求值期写 `__appVing__`，`js_app_context.cpp:182-191 SetGlobalNamedProperty(true, vm)` 把 app VM 挂到全局 `$app`。
+- `app.js` 仍保留 `if (typeof globalThis !== 'undefined') { globalThis.NEXIO = NEXIO; }`（`typeof` 对未声明标识符不抛错），模拟器因此零回归。
+- 页面侧三通道：`getApp().data.NEXIO` → `$app.data.NEXIO` → `globalThis.NEXIO`，任一路可用即可；`getApp()` 只在顶层调用一次并缓存（`app_data_module.cpp` 注释警告反复调用会造成 `ERR_REF_COUNT_LIMIT`「JS REF LIMIT」）。`getApp` 是引擎内置全局（`app_data_module.cpp:25-30`，`LoadAceBuiltInModules` 里 `AppDataModule::Load()`），**模拟器上也可用 ⇒ 抓帧验证走的就是真机同一条主通道**。
+
+### ② 圆形图标
+
+- **桌面图标**：`entry/src/main/resources/base/media/icon.png`（104×104，10,107 B）与 `icon_small.png`（92×92，8,198 B）重制为白底圆盘 + 内嵌 logo（logo 取原图 `mipmap-xxxhdpi/nexio_schedule.webp` 的彩色本体，占比 0.86，圆盘用椭圆掩码抗锯齿）；圆外 `alpha=0`，四角 alpha 全部为 0。
+- **关于页图标**：Lite canvas 无 `drawImage`、无 `clip`，只能靠点阵自身构图。`common/icon.js` 的 `ICON32` 重写为圆形点阵（32×32、32 色调色板，选色＝频次×(1+6×饱和度) 后按最小色距 45 贪心；实测 meanErr 4.35 / vivid 17，16 色档只剩 1 个鲜艳色故取 32 色）。校验：`rows=32 badRows=0 maxPaletteIndex=31 paletteCount=32 encLen=1015`。
+- 教训：给原图直接贴圆掩码会留白底残留；先缩小再合成会把 logo 混到盘外（紫/橙虚边）；正解是**在最终尺寸上合成**（超采样绘制椭圆掩码后 `putalpha`，不要在 `putalpha` 前 resize 掩码）。PIL 12.3.0：`Image.UNIFORM` 不存在；`quantize().getpalette()` 必须在 `convert('RGB')` 之前取。
+
+### ③ 显示名 label → Nexio
+
+- 根因：`entry/src/main/resources/base/element/string.json:12-13` 的 `MainAbility_label` 值是字面量 `"label"`（`config.json` 里 `label: "$string:MainAbility_label"`）⇒ 桌面显示 `label`。已改为 `"Nexio"`。
+
+### ④ 删设置页与作息页
+
+- `PAGE_ORDER` 去掉 `times`/`settings`；`drawView` 的两条分支、`crownTurn` 的 times 滚动分支、`drawTimes()`、`drawSettings()`、`doStep()`、`dispatch` 的 `step`/`reset` 分支全部删除；`nav()` 中间那枚胶囊由「设置」改为「同步」（新增 i18n 键 `btn_sync`，`common/i18n.js` 与打包用 `i18n/{zh-CN,en-US}.json` 同步补齐）；首页底部胶囊改为「今日 / 周 / i」；今日页环区热区与首页右滑手势改指向同步页。
+- `common/ui.js` 里「页面只通过 globalThis.NEXIO 取引用」的注释同步更正。
+- `store.js` 侧同步清理：`loadSeed` / `setCurrentWeek` / `setTotalWeeks` 已无调用者，一并删除。
+
+### ⑤ 全走手机同步（去种子）
+
+- `common/seed.js`（12 门示例课 + 2 条示例假期 + 示例设置）**删除**；新建 `common/defaults.js`：`settings()` 返回全空设置（`currentWeek:1`、`totalWeeks:18`，其余空串），`times()` 保留标准作息表。
+- `times()` 必须保留：`store.refreshSectionTimes()` → `model.absSectionTimes()` 用它建 `sectionTimes`，是首页/今日/详情/周课表所有时间文案的唯一来源；手机端 `WatchPayload` 会下发 `times` 覆盖它。
+- 同步页删掉「恢复示例数据」一行（`acts` 由 6 项减为 5 项）。
+- 空态表现（抓帧确认）：首页环内「—」「无课」、标题「无课」、副标题「课表来自手机端同步」、信息行「本周 第1周 · 共18周 / 今日课程 无课 / 下一节 无课 / 数据 未同步」；周课表标题下显示琥珀色「同步后显示日期」+ 七行「周一..周日 无课」；同步页 5 行「同步地址 未设置 / 立即同步 未同步 / 蓝牙发现手机端 本机不支持 / 导入内部文件 / 导出到内部文件」。
+
+### 尺寸与守门（第五轮两次构建）
+
+| 构建 | `app.js` | `pages/index/index.js` | 49,152 B 闸 |
+| --- | --- | --- | --- |
+| debug | 69,677 B | 42,896 B | app.js 超闸（-20,525，结构性：debug 不压缩且 app.js 内联全部 common）；页面合规（+6,256） |
+| `-p buildMode=release` | **40,702 B** | **26,070 B** | 两者合规（+8,450 / +23,082）；`app.bc` 34,572 B、`pages/index/index.bc` 21,854 B 亦合规 |
+
+- `tools/check-lite-size.ps1`：release `exit 0`、debug `exit 1`（`app.js` 一项）。
+- 本轮页面 bundle 由上一轮 47,837 B 降到 42,896 B（debug），主要来自删两页 + 删设置/作息代码。
+
+### 证据
+
+- 抓帧：`.dsh-tmp/shots-q1`（首页空态）、`shots-q2`（周课表空态）、`shots-q3`（关于页：圆形点阵图标 + 返回/退出）、`shots-q4`（下滑→周课表）、`shots-q5`（同步页 5 行）；`bands.py` 逐带与圆弦对照全部 in-chord。
+- 静态：`drawTimes|drawSettings|doStep|loadSeed|'times'|'settings'|'reset'` 全项目 0 命中；`node --check`（页面、`common/ui.js`、`common/i18n.js`、`app.js`）通过；`btn_sync` 4 处命中。
+- 独立性：docs-writer 与 verifier teammate 本轮仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）；真机项未验证（见 `design-and-plan.md` §12.4）。
+

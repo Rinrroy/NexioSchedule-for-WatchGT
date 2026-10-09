@@ -183,7 +183,8 @@ function pointOf(e) {
 /* -------------------------------------------------------------------------
  * 以下三个 helper 原本在 pages/index/index.js 里，为把页面 bundle 压到真机
  * 单文件 49,152 B 硬闸（js_fwk_common.h:89）以下而搬到内核侧：app.js 与页面
- * 各自独立享有该配额，页面只通过 globalThis.NEXIO 取引用。
+ * 各自独立享有该配额；内核引用由 app.js 挂到全局 $app.data.NEXIO（真机没有
+ * globalThis，只有 JSFWK_TEST==1 的模拟器才有），页面用 getApp().data.NEXIO 取。
  * ------------------------------------------------------------------------- */
 
 /* 应用图标点阵还原：canvas 没有 drawImage，icon 以「每行 RLE」内联在

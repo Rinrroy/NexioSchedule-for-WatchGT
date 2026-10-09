@@ -3,9 +3,22 @@
  *
  * 为什么内核放在这里：真机 Lite 引擎对每个 .js 文件限长 49,152 B
  * （js_fwk_common.h:89 FILE_CONTENT_LENGTH_MAX = 1024*48），超限即硬拒绝、
- * 页面零执行。页面自身代码已接近该限额，故把全部 common 模块先在
- * app.js 顶层 import 并发布到 globalThis.NEXIO，页面只做取引用。
- * 实测：app.js 模块顶层先于页面模块顶层执行，页面顶层即可读到 NEXIO。
+ * 页面零执行。页面自身代码已接近该限额，故把全部 common 模块先在 app.js
+ * 顶层 import 并发布给页面，页面只做取引用。
+ *
+ * 为什么不再用 globalThis（m08330 真机黑屏根因）：
+ *   引擎只在 #if (JSFWK_TEST == 1) 时才把 globalThis 挂到全局对象
+ *   （frameworks/src/core/context/js_app_environment.cpp:85-89），而
+ *   JSFWK_TEST=1 只定义在 targets/simulator/acelite_config.h:28-29 ⇒ 真机没有
+ *   globalThis。旧写法 globalThis.NEXIO = {...} 会让 app.js 求值当场抛
+ *   ReferenceError —— 表现就是「无 onCreate 日志、整屏黑、不重启」，而
+ *   模拟器一切正常（模拟器定义了 JSFWK_TEST）。
+ *   现在发布走 ViewModel 的 data 通道：runtime-core 的 ViewModel 在
+ *   __appVing__ 为真（app 求值期）时直接 vm.data = data
+ *   （runtime-core/src/core/index.js:80-84），而 AppDataModule 的全局函数
+ *   getApp() 返回这个 app VM（modules/presets/app_data_module.cpp:45-68），
+ *   页面因此读 getApp().data.NEXIO。引擎另把 app VM 挂在全局 $app 上
+ *   （js_app_context.cpp:182-191），页面同时保留 $app.data 与 globalThis 兜底。
  * ------------------------------------------------------------------------- */
 import * as store from './common/store.js';
 import * as M from './common/model.js';
@@ -20,7 +33,7 @@ import { ICON32 } from './common/icon.js';
    页面自己 import 会多一个模块，故统一在这里发布（m06685：“退出”曾经退化成回首页）。 */
 import app from '@system.app';
 
-globalThis.NEXIO = {
+var NEXIO = {
   store: store,
   M: M,
   D: D,
@@ -37,7 +50,18 @@ globalThis.NEXIO = {
   VERSION: C.VERSION
 };
 
+/* 模拟器兼容：只有 globalThis 真的存在时才写（真机 typeof 为 'undefined'）。
+   typeof 对未声明的标识符不会抛错 —— 这是本文件能在真机跑完的关键。 */
+if (typeof globalThis !== 'undefined') {
+  globalThis.NEXIO = NEXIO;
+}
+
 export default {
+  /* data 是 ViewModel 唯一会原样保留的自定义通道；getApp() 还要求 app VM 上
+     有 data 属性，否则返回 undefined（app_data_module.cpp:55-59）。 */
+  data: {
+    NEXIO: NEXIO
+  },
   onCreate() {
     console.info('NexioWatch onCreate');
   },

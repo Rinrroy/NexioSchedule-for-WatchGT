@@ -2,18 +2,19 @@
  * NexioWatch - 同步模块（不使用 Wear Engine）
  *
  * 本机 SDK 没有 @system.wearengine（历史白屏 bug 的直接原因），因此同步实现为：
- *   1) 局域网自动同步（主通道）：@system.fetch 轮询手机端 NexioSchedule 暴露的
- *      http://<host>:8787/schedule.json，内容就是手机端 WatchPayload.buildFullJson()
- *      的 v4 JSON；成功后落库并记录同步时间。
- *   2) 文件通道（备用/离线）：internal://app/import/nexio_schedule.json（用
- *      hdc file send 推入）与 internal://app/rawfile/nexio_schedule.json（随包内置）。
+ *   唯一通道 = 局域网自动同步：@system.fetch 轮询手机端 NexioSchedule 暴露的
+ *   http://<host>:8787/schedule.json，内容就是手机端 WatchPayload.buildFullJson()
+ *   的 v4 JSON；成功后落库并记录同步时间。
+ *
+ *   文件导入/导出通道与 BLE 发现通道已删除（m09613）：真机内存紧张，无用通道
+ *   既占堆又占包体，且 rawfile 目录在 entry 里根本不存在。
  *
  * 所有网络调用都在 try/catch 内，失败只更新状态，不抛异常到页面生命周期。
  */
 import fetch from '@system.fetch';
 import {
   PROTOCOL_NAME, PROTOCOL_VERSION, MAX_COURSES, MAX_INCOMING, COURSE_COLORS,
-  SYNC_TIMEOUT_MS, SYNC_POLL_MS
+  SYNC_TIMEOUT_MS
 } from './const.js';
 import * as M from './model.js';
 import * as D from './date.js';
@@ -212,18 +213,4 @@ function manualPull(store, cb) {
   });
 }
 
-/* 文件通道导入（rawfile / internal import 文件都由 page 先读出文本再调用） */
-function importText(store, text, sourceName, cb) {
-  var parsed = parse(text, store.get ? store.get().settings.currentWeek : 0);
-  if (!parsed.ok) {
-    if (cb) cb(false, parsed.error);
-    return;
-  }
-  parsed.source = sourceName;
-  store.applyPayload(parsed);
-  store.save();
-  if (cb) cb(true, sourceName + '：' + parsed.courses.length + ' 门课');
-}
-
-export { parse, pull, manualPull, importText, SYNC_POLL_MS };
-export default { parse: parse, pull: pull, manualPull: manualPull, importText: importText };
+export { parse, manualPull };

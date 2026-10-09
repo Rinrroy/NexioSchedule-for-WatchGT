@@ -53,4 +53,3 @@ function times() {
 }
 
 export { settings, times };
-export default { settings: settings, times: times };

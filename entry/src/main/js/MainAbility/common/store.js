@@ -1,21 +1,18 @@
 /*
- * NexioWatch - 全局状态与持久化
+ * NexioWatch - 全局状态（内存态）
  *
- * 持久化策略（受 lite API 限制驱动）：
- *   - @system.storage 单值 < 128 字节 -> 只放小标志（版本/当前周/同步时间/同步地址）；
- *   - 完整数据用 @system.file 写到 internal://app/nexio/schedule.json；
- *   - 任何一步失败都只降级（保留内存里的上一份数据），不抛异常、不白屏。
+ * 数据来源只有一条：手机端局域网同步（sync.js）。课表不再落盘 —— m09613 起
+ * @system.file 通道整体删除，原因：真机 JS 堆紧张（jerry 的 JS HEAP OOM 会被
+ * fatal_handler 转成 AMS 重启，即「软重启」），而读盘要 file.access + 分片 readText
+ * 拼 65KB 字符串再 JSON.parse 出一整棵对象树，是启动期最大的单笔堆峰值之一；
+ * 且没有任何调用者调用 save()（写入侧本来就是死码）。
  *
- * 同步地址（syncHost）是唯一允许写入 storage 的动态值：手机端局域网服务地址，
- * 形如 "10.0.2.2" 或 "10.0.2.2:8787"，长度远小于 128 字节。
- *
- * 注意：模拟器与预览器不执行 @system.file，真机才算证据。
+ * 只把「下次开机还要用」的三个小标志写 @system.storage（单值 < 128 字节）：
+ * 当前周 / 上次同步时间 / 手机端同步地址；课表内容每次开机由 autoSync 从手机端拉取。
  */
-import file from '@system.file';
 import storage from '@system.storage';
 import {
-  MAX_COURSES, MAX_WEEKS, KEY_VERSION, KEY_WEEK, KEY_SYNC_AT, KEY_SYNC_HOST,
-  URI_DATA, URI_IMPORT, URI_RAW, URI_EXPORT, PROTOCOL_VERSION, PROTOCOL_NAME,
+  MAX_COURSES, MAX_WEEKS, KEY_WEEK, KEY_SYNC_AT, KEY_SYNC_HOST,
   DEFAULT_SYNC_PORT
 } from './const.js';
 import * as M from './model.js';
@@ -39,7 +36,6 @@ function defaultSettings() {
 
 var state = {
   ready: false,
-  fileOk: true,
   courses: [],
   holidays: [],
   /* 当前 courses 属于哪一周（0 = 未知：还没从手机端同步过）。
@@ -50,8 +46,6 @@ var state = {
   sectionTimes: {},
   lastSync: 0,
   source: '未同步',
-  selectedId: '',
-  selectedDay: 0,
   lastError: '',
   syncHost: '',
   syncState: 'idle',
@@ -75,46 +69,6 @@ function loadCourses(list) {
   return out;
 }
 
-/*
- * 本地文件二次防线：旧版本可能往文件里写过整学期课程
- * （sync.js 的 MAX_BODY=65536 会直接拒绝那种响应，但文件通道没有这层保护）。
- * 读回时按该文件所属的周用 isActiveInWeek 滤一遍并截到 MAX_COURSES，
- * 内存里就永远只留一周的课；week 不在 1..MAX_WEEKS 时只截断不过滤。
- */
-function filterCoursesByWeek(list, week) {
-  var out = [];
-  var i;
-  if (!list || !list.length) return out;
-  var w = M.toInt(week, 0);
-  if (w < 1 || w > MAX_WEEKS) {
-    /* 周次未知：保持旧行为，只截断不筛选 */
-    for (i = 0; i < list.length && out.length < MAX_COURSES; i++) {
-      out.push(M.normalizeCourse(list[i]));
-    }
-    return out;
-  }
-  /* 先做廉价命中判断再 normalize，旧整表文件上百门课时不为未命中的课建对象。
-     兜底与 sync.js collectWeek 一致：startWeek<=0 视为 1、endWeek<=0 视为整学期，
-     否则旧数据里 startWeek=0/endWeek=0 的新建课程会被整个丢掉。 */
-  for (i = 0; i < list.length && out.length < MAX_COURSES; i++) {
-    var raw = list[i];
-    if (!raw) continue;
-    var sw = M.toInt(raw.startWeek, 1);
-    var ew = M.toInt(raw.endWeek, 18);
-    if (sw <= 0) sw = 1;
-    if (ew <= 0) ew = MAX_WEEKS;
-    var probe = {
-      selectedWeeks: raw.selectedWeeks,
-      startWeek: sw,
-      endWeek: ew,
-      weekType: M.toInt(raw.weekType, 0)
-    };
-    if (!M.isActiveInWeek(probe, w)) continue;
-    out.push(M.normalizeCourse(raw));
-  }
-  return out;
-}
-
 /* 当前缓存的数据是不是「本周」的；false 时 UI 要提示重新同步 */
 function dataIsCurrentWeek() {
   if (!state.dataWeek) return true;
@@ -132,50 +86,6 @@ function get() {
     refreshSectionTimes();
   }
   return state;
-}
-
-function courseById(id) {
-  var i;
-  for (i = 0; i < state.courses.length; i++) {
-    if (state.courses[i].id === id) return state.courses[i];
-  }
-  return null;
-}
-
-function selectedCourse() {
-  return courseById(state.selectedId);
-}
-
-function select(id) {
-  state.selectedId = id ? String(id) : '';
-}
-
-function selectDay(day) {
-  state.selectedDay = M.clamp(M.toInt(day, 0), 0, 7);
-}
-
-function upsert(course) {
-  var c = M.normalizeCourse(course);
-  var i;
-  for (i = 0; i < state.courses.length; i++) {
-    if (state.courses[i].id === c.id) {
-      state.courses[i] = c;
-      return c;
-    }
-  }
-  if (state.courses.length >= MAX_COURSES) return null;
-  state.courses.push(c);
-  return c;
-}
-
-function remove(id) {
-  var out = [];
-  var i;
-  for (i = 0; i < state.courses.length; i++) {
-    if (state.courses[i].id !== id) out.push(state.courses[i]);
-  }
-  state.courses = out;
-  if (state.selectedId === id) state.selectedId = '';
 }
 
 function setSyncHost(host) {
@@ -252,158 +162,12 @@ function applyPayload(payload) {
   /* 数据归属周：同步通道给明确的 week，本地文件读回 data_week；
      都没有就认为跟 currentWeek 一致（内置示例/旧文件）。 */
   if (payloadWeek >= 1 && payloadWeek <= MAX_WEEKS) state.dataWeek = payloadWeek;
-  else if (payload.source && String(payload.source).indexOf('本地') === 0) state.dataWeek = 0;
   else state.dataWeek = state.settings.currentWeek;
   state.lastSync = new Date().getTime();
   state.source = payload.source ? String(payload.source) : '同步导入';
   state.lastError = '';
   refreshSectionTimes();
   return true;
-}
-
-function toJson() {
-  var out = {
-    protocol: PROTOCOL_NAME,
-    version: PROTOCOL_VERSION,
-    action: 'replace',
-    sentAt: new Date().getTime(),
-    data_week: state.dataWeek,
-    schedule_name: state.settings.scheduleName,
-    term_start: state.settings.termStart,
-    settings: {
-      current_week: state.settings.currentWeek,
-      total_weeks: state.settings.totalWeeks,
-      morning_sections: state.settings.morningSections,
-      afternoon_sections: state.settings.afternoonSections,
-      evening_sections: state.settings.eveningSections
-    },
-    times: state.times,
-    courses: [],
-    holidays: state.holidays
-  };
-  var i;
-  for (i = 0; i < state.courses.length; i++) {
-    var c = state.courses[i];
-    out.courses.push({
-      id: c.id, name: c.name, dayOfWeek: c.dayOfWeek,
-      startSection: c.startSection, endSection: c.endSection,
-      startWeek: c.startWeek, endWeek: c.endWeek, weekType: c.weekType,
-      selectedWeeks: c.selectedWeeks, isCustomTime: c.isCustomTime,
-      customStartTime: c.customStartTime, customEndTime: c.customEndTime,
-      location: c.location, teacher: c.teacher, color: c.color
-    });
-  }
-  return JSON.stringify(out);
-}
-
-/* ---------------- 文件接口（全部回调式，禁止异步语法） ---------------- */
-
-function dirOf(uri) {
-  var i = uri.lastIndexOf('/');
-  return i > 0 ? uri.substring(0, i) : uri;
-}
-
-/* 单次读取上限 4096（官方接口上限），超长文件按 position 连续读 */
-function readAllText(uri, cb) {
-  var parts = [];
-  var offset = 0;
-  var rounds = 0;
-  var done = false;
-  var guard = 0;
-
-  function finish(ok, text) {
-    if (done) return;
-    done = true;
-    if (guard) clearTimeout(guard);
-    cb(ok, text);
-  }
-
-  function step() {
-    rounds = rounds + 1;
-    /* 上限 16 x 4096 = 65,536 字符，与 sync.js 的 MAX_BODY 对齐：读回来的整串
-       会在内存里再复制一份给 JSON.parse，解析峰值必须留出余量（真机 512KB 档） */
-    if (rounds > 16) { finish(parts.length > 0, parts.join('')); return; }
-    try {
-      file.readText({
-        uri: uri,
-        position: offset,
-        length: 4096,
-        success: function (data) {
-          var text = (data && data.text) ? data.text : '';
-          parts.push(text);
-          if (text.length < 4096) { finish(true, parts.join('')); return; }
-          offset = offset + 4096;
-          step();
-        },
-        fail: function () {
-          if (parts.length > 0) finish(true, parts.join(''));
-          else finish(false, '');
-        }
-      });
-    } catch (e) {
-      finish(false, '');
-    }
-  }
-
-  guard = setTimeout(function () { finish(parts.length > 0, parts.join('')); }, 6000);
-  step();
-}
-
-function readText(uri, cb) {
-  var done = false;
-  var guard = 0;
-  function finish(ok, text) {
-    if (done) return;
-    done = true;
-    if (guard) clearTimeout(guard);
-    cb(ok, text);
-  }
-  guard = setTimeout(function () { finish(false, ''); }, 3000);
-  try {
-    file.access({
-      uri: uri,
-      success: function () { readAllText(uri, finish); },
-      fail: function () { finish(false, ''); }
-    });
-  } catch (e) {
-    state.fileOk = false;
-    finish(false, '');
-  }
-}
-
-function writeText(uri, text, cb) {
-  var done = false;
-  var guard = 0;
-  function finish(ok) {
-    if (done) return;
-    done = true;
-    if (guard) clearTimeout(guard);
-    if (cb) cb(ok);
-  }
-  guard = setTimeout(function () { finish(false); }, 5000);
-  function doWrite() {
-    try {
-      file.writeText({
-        uri: uri,
-        text: text,
-        success: function () { finish(true); },
-        fail: function () { finish(false); }
-      });
-    } catch (e) {
-      finish(false);
-    }
-  }
-  try {
-    file.mkdir({
-      uri: dirOf(uri),
-      recursive: true,
-      success: doWrite,
-      fail: doWrite
-    });
-  } catch (e) {
-    state.fileOk = false;
-    finish(false);
-  }
 }
 
 /* ---------------- storage 小标志 ---------------- */
@@ -454,57 +218,8 @@ function load(cb) {
   flagGet(KEY_SYNC_HOST, function (host) {
     if (host) state.syncHost = host;
   });
-
-  readText(URI_DATA, function (ok, text) {
-    if (ok && text) {
-      var parsed = null;
-      try {
-        parsed = JSON.parse(text);
-      } catch (e) {
-        parsed = null;
-        state.lastError = '本地数据解析失败';
-      }
-      if (parsed) {
-        /* 旧文件可能躺着整学期课程：按这份文件所属的周再滤一次，只把那一周的课装进内存。
-           周次以 data_week 为准（与下面回填的 dataWeek 同源），旧文件没有该字段时退回
-           settings.current_week，再退回内存里的当前周。 */
-        var storedWeek = M.toInt(parsed.data_week, 0);
-        if (storedWeek < 1 || storedWeek > MAX_WEEKS) {
-          storedWeek = parsed.settings ? M.toInt(parsed.settings.current_week, 0) : 0;
-        }
-        if (storedWeek < 1 || storedWeek > MAX_WEEKS) storedWeek = state.settings.currentWeek;
-        applyPayload({
-          ok: true,
-          courses: filterCoursesByWeek(parsed.courses, storedWeek),
-          settings: parsed.settings,
-          times: parsed.times, holidays: parsed.holidays, source: '本地文件',
-          week: M.toInt(parsed.data_week, 0)
-        });
-      }
-    }
-    finish(ok);
-  });
+  finish(true);
 }
-
-function save(cb) {
-  var text = toJson();
-  writeText(URI_DATA, text, function (ok) {
-    flagSet(KEY_VERSION, PROTOCOL_VERSION);
-    flagSet(KEY_WEEK, state.settings.currentWeek);
-    if (state.lastSync > 0) flagSet(KEY_SYNC_AT, state.lastSync);
-    if (!ok) {
-      state.fileOk = false;
-      state.lastError = '文件写入失败，数据仅本次运行有效';
-    } else {
-      state.lastError = '';
-    }
-    if (cb) cb(ok);
-  });
-}
-
-function readImportFile(cb) { readText(URI_IMPORT, cb); }
-function readRawFile(cb) { readText(URI_RAW, cb); }
-function exportToFile(cb) { writeText(URI_EXPORT, toJson(), cb); }
 
 function markSynced() {
   state.lastSync = new Date().getTime();
@@ -538,25 +253,10 @@ function syncHostLabel() {
 }
 
 export {
-  load, save, get, refreshSectionTimes,
-  select, selectDay, selectedCourse, courseById, upsert, remove,
+  load, get, refreshSectionTimes,
   setSyncHost,
   weekOfDate, dateOfWeekday, holidayName, isHoliday,
   dataIsCurrentWeek, dataWeekLabel,
-  applyPayload, toJson, markSynced, syncUrl, syncHostLabel,
-  flagSet, flagGet, readImportFile, readRawFile, exportToFile
-};
-
-export default {
-  load: load, save: save, get: get, refreshSectionTimes: refreshSectionTimes,
-  select: select, selectDay: selectDay, selectedCourse: selectedCourse, courseById: courseById,
-  upsert: upsert, remove: remove,
-  setSyncHost: setSyncHost,
-  weekOfDate: weekOfDate, dateOfWeekday: dateOfWeekday,
-  holidayName: holidayName, isHoliday: isHoliday,
-  dataIsCurrentWeek: dataIsCurrentWeek, dataWeekLabel: dataWeekLabel,
-  applyPayload: applyPayload, toJson: toJson, markSynced: markSynced,
-  syncUrl: syncUrl, syncHostLabel: syncHostLabel,
-  flagSet: flagSet, flagGet: flagGet,
-  readImportFile: readImportFile, readRawFile: readRawFile, exportToFile: exportToFile
+  applyPayload, markSynced, syncUrl, syncHostLabel,
+  flagSet
 };

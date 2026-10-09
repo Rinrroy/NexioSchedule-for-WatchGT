@@ -53,11 +53,3 @@ function nameOf(list, iso) {
 }
 
 export { MAX_HOLIDAYS, normalize, find, isHoliday, nameOf };
-
-export default {
-  MAX_HOLIDAYS: MAX_HOLIDAYS,
-  normalize: normalize,
-  find: find,
-  isHoliday: isHoliday,
-  nameOf: nameOf
-};

@@ -30,27 +30,6 @@
     ],
     "reqPermissions": [
       {
-        "reason": "上课提醒振动",
-        "usedScene": {
-          "when": "inuse"
-        },
-        "name": "ohos.permission.VIBRATE"
-      },
-      {
-        "reason": "扫描手机端广播以获取局域网同步地址",
-        "usedScene": {
-          "when": "inuse"
-        },
-        "name": "ohos.permission.ACCESS_BLUETOOTH"
-      },
-      {
-        "reason": "扫描周围蓝牙设备广播",
-        "usedScene": {
-          "when": "inuse"
-        },
-        "name": "ohos.permission.DISCOVER_BLUETOOTH"
-      },
-      {
         "reason": "局域网同步课表数据",
         "usedScene": {
           "when": "inuse"

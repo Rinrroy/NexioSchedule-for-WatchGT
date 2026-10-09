@@ -67,11 +67,6 @@ function hhmmToMinutes(text) {
   return h * 60 + m;
 }
 
-function minutesToText(min) {
-  var m = min < 0 ? 0 : min;
-  return pad2(Math.floor(m / 60)) + ':' + pad2(m % 60);
-}
-
 /* 长日期：zh "2026年10月1日" / en "Oct 1, 2026" */
 var MONTH_EN = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -101,24 +96,9 @@ function fmtShort(iso) {
   return (d.getMonth() + 1) + '/' + d.getDate();
 }
 
+/* 只导出被外部取用的成员：DAY_MS/toISO/isoToMs 仅模块内使用，
+   minutesToText 全工程无调用者（m09613 已删）。 */
 export {
-  DAY_MS, pad2, toISO, isoToMs, todayISO, addDays, isoWeekday, daysBetween,
-  nowMinutes, hhmmToMinutes, minutesToText, fmtLong, fmtMonthDay, fmtShort
-};
-
-export default {
-  DAY_MS: DAY_MS,
-  pad2: pad2,
-  toISO: toISO,
-  isoToMs: isoToMs,
-  todayISO: todayISO,
-  addDays: addDays,
-  isoWeekday: isoWeekday,
-  daysBetween: daysBetween,
-  nowMinutes: nowMinutes,
-  hhmmToMinutes: hhmmToMinutes,
-  minutesToText: minutesToText,
-  fmtLong: fmtLong,
-  fmtMonthDay: fmtMonthDay,
-  fmtShort: fmtShort
+  pad2, todayISO, addDays, isoWeekday, daysBetween,
+  nowMinutes, hhmmToMinutes, fmtLong, fmtMonthDay, fmtShort
 };

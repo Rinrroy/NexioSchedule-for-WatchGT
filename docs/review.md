@@ -404,16 +404,16 @@
 
 ### 真机待验证清单（阻断项优先）
 
-1. **`@system.bluetooth`**：GT5/GT6 上 `startBLEScan`/`subscribeBLEFound` 是否返回手机端广播，且 `res.devices[i].data` 的形态是明文 `"NEXIO|ip:port"` 还是十六进制串（`ble.js:45-67` 两种都兼容但需实测确认）。
-2. **`@system.fetch`**：局域网 `GET http://<host>:8787/schedule.json` 是否可用（`ohos.permission.INTERNET` 已声明，属防御性补齐；`.d.ts` 无 `@permission` 标注）。
-3. **`@system.file`**：读 `internal://app/rawfile/nexio_schedule.json`（rawfile 目录当前为空）与 `internal://app/import/nexio_schedule.json`、写 `internal://app/nexio/schedule.json` 是否成功（模拟器不执行）。
-4. **`@system.storage`**：四个小标志读写是否成功；`< 128 字节` 限制下是否有额外行为。
-5. **`@system.vibrator`**：振动是否触发、时长/强度与权限弹窗行为。
-6. **实际 JS heap 档位**：决定 `MAX_COURSES` 能否维持 12；若真要覆盖 GT2，改为 5。
-7. **466×466 圆屏**：中文字号与安全区表现（模拟器只验证了 454×454）。
-8. **`onDestroy` 与蓝牙订阅**：离开页面后是否确实停止扫描（模拟器上 `@system.bluetooth` 为 undefined，无法覆盖）。
-9. **表冠（第二轮新增阻断项）**：模拟器**无法注入表冠事件**，`onCrown`/`crownTurn`/`pageTurn` 的分派与首页环形翻页**未在硬件验证**；真机需确认顺时针方向、灵敏度与 16 度/档的手感。
-10. **首页在 64 KB 档的峰值**：本轮模拟器内存 ack 为 512 KB 档配置（`allocBytes 113224`/`peakAllocBytes 118760`；收尾复测 115992/116088），64 KB 真机（GT2）未测。
+> 本清单已在第七轮（m09613）按「删净无用同步通道」的结果重写：BLE 扫描、`@system.file` 读写、
+> 振动三条通道的实现已整体删除，对应的验证项一并作废。
+
+1. **`@system.fetch`**：局域网 `GET http://<host>:8787/schedule.json?week=N` 是否可用（`ohos.permission.INTERNET` 已声明；`.d.ts` 无 `@permission` 标注，属防御性补齐）。
+2. **`@system.storage`**：三个小标志（`nexio_week` / `nexio_sync_at` / `nexio_sync_host`）读写是否成功；`< 128 字节` 限制下是否有额外行为。
+3. **实际 JS heap 档位**：决定 `MAX_COURSES`（现为 16）能否维持；若真要覆盖 GT2 的 64 KB 档，需下调。
+4. **466×466 圆屏**：中文字号与安全区表现（模拟器只验证了 454×454）。
+5. **表冠（第二轮新增阻断项）**：模拟器**无法注入表冠事件**，`onCrown`/`crownTurn`/`pageTurn` 的分派与首页环形翻页**未在硬件验证**；真机需确认顺时针方向、灵敏度与 16 度/档的手感。
+6. **首页在 64 KB 档的峰值**：模拟器内存 ack 为 512 KB 档配置（`allocBytes 87496` / `peakAllocBytes 87728`，第七轮实测），64 KB 真机（GT2）未测。
+7. **软重启是否消失（第六、七轮）**：需在真机上打开后长时间停留 + 多次翻页，并用 `hdc` 抓 hilog 确认无 `ERR_OUT_OF_MEMORY` / `JS HEAP OOM`。
 
 ## 第三轮（2026-10-09）：真机「单文件 49,152 B 硬闸」——黑屏根因与内核分离
 
@@ -609,3 +609,79 @@
 - 版本：`common/const.js` 单一来源升到 **v1.0.2**，已核对 release 包内 `app.js` 含 `v1.0.2` 且不含 `v1.0.1`。
 - 独立性：docs-writer 与 verifier teammate 本轮仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。**真机结论待验证**：软重启是否消失需在真机复测（本轮只在模拟器侧证明主线程占用与日志风暴已消除）。
 
+## 第七轮（2026-10-10）：真机仍软重启（m09613）——删净无用同步通道 + 运行期减堆
+
+### ① 反馈
+
+> 「还是软重启尝试一下把其他用不到的同步方式删干净」
+
+第六轮只消除了字体日志风暴与动画定时器欠帧，真机**仍然软重启**。用户同时要求把用不到的同步方式删干净。
+
+### ② 软重启的引擎机制（源码级，本轮定论）
+
+| 事实 | 引擎证据 |
+| --- | --- |
+| 唯一会「重启」的路径是 **jerry 自身 fatal** | `fatal_handler.cpp:90-95` `RegisterFatalHandler` 调 `jerry_port_default_set_fatal_handler(HandleFatal)`；`:53-81` `HandleFatal(errorCode)` → `SetFatalError` → `HandleFatalInternal` → **`ProductAdapter::SendTerminatingRequest(GetCurrentAbilityToken(), true)`** → 通知 AMS 拆掉应用 ⇒ 系统重新拉起，即用户看到的「软重启」 |
+| 引擎**不会**自造 fatal | `SetFatalError(` 全仓库只有两处调用（`fatal_handler.cpp:62` 与单元测试），`HandleFatalError(` 只在 `fatal_handler.cpp:132`；`ERR_OUT_OF_MEMORY` 等常量来自 jerry-core 的 `JERRY_FATAL_*` 枚举，本机源码树里没有 jerry-core |
+| **49,152 B 超闸不会软重启**，只会黑屏 | `js_app_context.cpp:85-100`：读失败/超闸 → HILOG + `ACE_ERROR_CODE_PRINT(EXCE_ACE_PAGE_FILE_TOO_HUGE)` + `return UNDEFINED`（该文件零执行），没有任何 terminate 调用 |
+| 设备默认跑 **snapshot(.bc)** | `platform_adapter.cpp:41-48` `SetEngineSnapshotMode`：`#if (TARGET_SIMULATOR != 1) mode = true;`；`js_ability_impl.cpp:70` 取 `app.bc`。模拟器侧两个函数都是空操作 ⇒ 永远 parser 模式 |
+| 小堆下求值失败**不是**重启 | `js_page_state_machine.cpp:324` 'Eval JS file failed' + `'Nothing to render as it is undefined.'`，只是画面不出来 |
+
+结论：真机软重启 = **JS 堆被 jerry fatal 打死**。本机**无法复现**（模拟器不是设备同款引擎配置），只能靠压缩堆占用保守收敛。
+
+### ③ 模拟器堆档位扫描（本机唯一可量化的手段）
+
+`-hs <字节>` 直通 jerry 堆容量（日志 `CommandParser js heap: N`；OOM 时报文的 `heap total size:` 与 N 相同）。新增 `.dsh-tmp/heapsweep.js` 逐档起模拟器并判定 `app=/page=/render=/alive=/OOM=`：
+
+| 档位 | 现象 |
+| --- | --- |
+| 48 KB | app.js 都求值不了（`app=-`） |
+| 64–76 KB | app.js 过、页面求值失败 |
+| 92 KB（改前） | **OOM**：currently 93,960 / byte code **44,160** / strings 20,678 / objects 7,752 / properties 14,080 |
+| 96 KB（改前） | 恰好够用 |
+| 80 KB（改后） | OOM：currently 81,728 / byte code **38,104** / strings 18,738 / objects 6,944 / properties 11,744 |
+| 88 KB（改后） | 通过 |
+
+⇒ 启动净需从 ≈96 KB 降到 **≈88 KB（−8 KB）**，其中字节码 44,160 → 38,104（−6,056）、对象 7,752 → 6,944、属性 14,080 → 11,744。**注意**：`HEAP_TIER_KB = 512` 只是 app 自报的机型档位，跟被配置的堆大小无关；真机既然能打开页面，堆必然 ≥96 KB，软重启更可能是**运行期堆增长**而非启动即死。
+
+### ④ 删干净无用同步通道（本轮主场）
+
+| 通道 | 处置 | 证据 |
+| --- | --- | --- |
+| **BLE 扫描（蓝牙发现手机端）** | 整个 `common/ble.js` 删除（4,757 B），页面 `bleLabel/doBleScan` 与同步页那一行一并删除 | `@system.bluetooth` 在引擎模块表 `ohos_module_config.h:97-158` 里**没有条目**，`requireNative` 只能拿到 `undefined` ⇒ 这条通道本来就是死码 |
+| **文件导入 / 导出** | `const.js` 的 `URI_IMPORT/URI_RAW/URI_EXPORT`、`store.js` 的 `readImportFile/readRawFile/exportToFile`、`sync.js` 的 `importText`、页面 `doImport/applyImport/doExport` 全部删除；`entry/src/main` 下本来就**没有 rawfile 目录** | 与 BLE 同理，且 `@system.file` 读盘要在 JS 堆里拼 65 KB 字符串再 `JSON.parse`，是启动期最大单笔峰值 |
+| **落盘持久化（`@system.file`）** | `store.js` 的 `save/toJson/dirOf/readAllText/readText/writeText` 与 `URI_DATA` 全删；持久化只留三个 `@system.storage` 小标志（当前周 / 上次同步时间 / 同步地址） | 全工程 `grep '.save('` **0 命中** ⇒ 写盘通道从来没有调用者；读盘只有 `load()` 里一条 |
+| **`config.json` 权限** | 删 `ohos.permission.VIBRATE`、`ACCESS_BLUETOOTH`、`DISCOVER_BLUETOOTH`，只留 `INTERNET` | 源码里 `vibrator|VIBRATE|@system.bluetooth` 全 0 命中 |
+| **保留** | 局域网 HTTP 同步（`@system.fetch`，`sync.js` 唯一实现）+ `@system.storage` 小标志 + `@system.app` terminate | — |
+
+同步页因此从 5 行收敛为 2 行（同步地址 / 立即同步），副标题改为「仅通过局域网从手机端同步」。
+
+### ⑤ 运行期减堆（本轮第二主场）
+
+按 92 KB OOM 的内存账逐项剪枝：
+
+| # | 处置 | 收益 |
+| --- | --- | --- |
+| 1 | 删掉 **9 个模块的 `export default {...}`**（全工程唯一默认导入是 `model.js → const.js`） | 每次求值少建 ~130 个属性与 9 个对象；`const.js` 的默认对象进一步只留 `model.js` 真正取用的 3 个键 |
+| 2 | 删全部**死导出与死函数**：`store` 的 `courseById/selectedCourse/select/selectDay/upsert/remove/filterCoursesByWeek`、`model` 的 `colorOf/cloneCourse/timeText/sectionText/calculatePeriodTimes/periodIndex/hasCourseOnDay/nowAndNext/hhmm`、`date` 的 `minutesToText`、`i18n` 的 `days/daysShort` 与 5 个死键 | 少解析、少分配 |
+| 3 | 页面 `redraw()` 里 `this.taps = []` → **`this.taps.length = 0`** | 30 s 定时器与过渡期不再每帧造数组 |
+| 4 | `app.js` 删掉 `globalThis.NEXIO` 兼容分支，页面删掉第三条取引用通道 | 真机上只会白建一个永不读取的全局属性 |
+| 5 | `entry/src/main/js/MainAbility/common/img/app_icon.png` 无任何引用 | 从 HAP 里去掉一张 5,258 B 的图 |
+
+### ⑥ 尺寸与守门（本轮三次构建）
+
+| 构建 | `app.js` | `pages/index/index.js` | 49,152 B 闸 |
+| --- | --- | --- | --- |
+| debug | 48,228 B | 41,622 B | **两者首次同时合规**（+924 / +7,530） |
+| `-p buildMode=release` | **28,724 B** | **25,227 B** | +20,428 / +23,925；`app.bc` 25,180 / `index.bc` 20,652 亦合规 |
+
+- `tools/check-lite-size.ps1`（release）：`[ OK ] app.js = 28724 B` / `[ OK ] pages\index\index.js = 25227 B` / `All .js artifacts are inside the real-device per-file hard limit.` **exit 0**。
+- **debug 首次合规**是结构性的：删掉 `@system.file` 通道后 app.js 从 69,750 B 降到 48,228 B，页面从 43,927 B 降到 41,622 B。此前「真机必须装 release」的结论仍然成立（余量只有 924 B），但 debug 包已不再是黑屏包。
+
+### ⑦ 证据与待验证
+
+- 静态：12 个 `.js` 全部 `node --check`（`.dsh-tmp/chk/*.mjs`）通过；`export default` 仅剩 3 处且都必需（`app.js` app VM、`const.js` 被 `model.js` 默认导入、`pages/index/index.js` 页面 VM）。
+- 尺寸：`.dsh-tmp/build3.ps1`（debug + release 双构建），守门脚本输出见上表。
+- 堆：`.dsh-tmp/heapsweep.js 64,72,80,88,96 13`，OOM 报文见 `.dsh-tmp/sim-hs80.log:33-47`。
+- **独立性**：docs-writer 与 verifier teammate 本轮仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。
+- **真机仍待验证**：软重启是否消失（判据：打开后长时间停留 + 多次翻页，`hdc` 抓 hilog 无 `ERR_OUT_OF_MEMORY` / `JS HEAP OOM`）。若仍复现，则说明真机堆比 88 KB 更紧或存在运行期增长点，下一步应改为「按需分配 + 更激进的缓存裁剪」。

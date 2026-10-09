@@ -18,14 +18,15 @@
  *   （runtime-core/src/core/index.js:80-84），而 AppDataModule 的全局函数
  *   getApp() 返回这个 app VM（modules/presets/app_data_module.cpp:45-68），
  *   页面因此读 getApp().data.NEXIO。引擎另把 app VM 挂在全局 $app 上
- *   （js_app_context.cpp:182-191），页面同时保留 $app.data 与 globalThis 兜底。
+ *   （js_app_context.cpp:182-191），页面同时保留 $app.data 兜底。
+ *   m09613 又删掉了 globalThis.NEXIO 兼容分支：那是给模拟器留的后路，真机上只会
+ *   白建一个永远不被读取的全局属性。
  * ------------------------------------------------------------------------- */
 import * as store from './common/store.js';
 import * as M from './common/model.js';
 import * as D from './common/date.js';
 import * as UI from './common/ui.js';
 import * as SY from './common/sync.js';
-import * as BLE from './common/ble.js';
 import * as C from './common/const.js';
 import { t } from './common/i18n.js';
 import { ICON32 } from './common/icon.js';
@@ -39,7 +40,6 @@ var NEXIO = {
   D: D,
   UI: UI,
   SY: SY,
-  BLE: BLE,
   t: t,
   ICON32: ICON32,
   app: app,
@@ -49,12 +49,6 @@ var NEXIO = {
   HEAP_TIER_KB: C.HEAP_TIER_KB,
   VERSION: C.VERSION
 };
-
-/* 模拟器兼容：只有 globalThis 真的存在时才写（真机 typeof 为 'undefined'）。
-   typeof 对未声明的标识符不会抛错 —— 这是本文件能在真机跑完的关键。 */
-if (typeof globalThis !== 'undefined') {
-  globalThis.NEXIO = NEXIO;
-}
 
 export default {
   /* data 是 ViewModel 唯一会原样保留的自定义通道；getApp() 还要求 app VM 上

@@ -17,10 +17,9 @@ var BUNDLES = {
     synced_at: '已同步', not_synced: '未同步',
     btn_back: '返回', btn_exit: '退出', btn_exit_confirm: '确认退出', exit_tip: '再点一次退出',
     exit_failed: '本机不支持退出',
-    btn_ok: '确定', btn_cancel: '取消',
     btn_refresh: '刷新', btn_week: '周', btn_info: 'i', btn_day: '今日', btn_sync: '同步',
     home_hint: '上滑今日课表 · 左滑关于',
-    home_week_label: '本周', home_today: '今日课程', home_data: '数据', home_host: '同步地址',
+    home_week_label: '本周', home_today: '今日课程', home_data: '数据',
     week_total: '共{n}周',
     home_next: '下一节',
     home_cached_week: '缓存为{n}，请重新同步',
@@ -32,12 +31,8 @@ var BUNDLES = {
     scroll_hint: '旋转表冠滚动',
     today_prefix: '今天是',
     week_label: '周课表', week_short: '第{n}周',
-    whole_week: '整周课程',
     no_class: '无课',
-    status_ongoing: '进行中', status_notstarted: '未开始', status_done: '已结束',
-    next_class: '下节课',
-    days: ['星期一', '星期二', '星期三', '星期四', '星期五', '星期六', '星期日'],
-    days_short: ['一', '二', '三', '四', '五', '六', '日']
+    status_ongoing: '进行中', status_notstarted: '未开始', status_done: '已结束'
   },
   'en-US': {
     app_name: 'Nexio Schedule',
@@ -49,10 +44,9 @@ var BUNDLES = {
     synced_at: 'Synced', not_synced: 'Not synced',
     btn_back: 'Back', btn_exit: 'Exit', btn_exit_confirm: 'Confirm', exit_tip: 'Tap again to exit',
     exit_failed: 'Exit unavailable',
-    btn_ok: 'OK', btn_cancel: 'Cancel',
     btn_refresh: 'Refresh', btn_week: 'W', btn_info: 'i', btn_day: 'Today', btn_sync: 'Sync',
     home_hint: 'Up: today · Left: about',
-    home_week_label: 'Week', home_today: 'Today', home_data: 'Data', home_host: 'Sync host',
+    home_week_label: 'Week', home_today: 'Today', home_data: 'Data',
     week_total: '{n} weeks',
     home_next: 'Next',
     home_cached_week: 'Cached {n}, re-sync',
@@ -64,12 +58,8 @@ var BUNDLES = {
     scroll_hint: 'Rotate crown to scroll',
     today_prefix: 'Today is',
     week_label: 'Week', week_short: 'W{n}',
-    whole_week: 'Whole week',
     no_class: 'Free',
-    status_ongoing: 'Now', status_notstarted: 'Later', status_done: 'Done',
-    next_class: 'Next',
-    days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'],
-    days_short: ['M', 'T', 'W', 'T', 'F', 'S', 'S']
+    status_ongoing: 'Now', status_notstarted: 'Later', status_done: 'Done'
   }
 };
 
@@ -105,13 +95,5 @@ function t(key, n) {
   return v;
 }
 
-function days() {
-  return bundle().days;
-}
-
-function daysShort() {
-  return bundle().days_short;
-}
-
-export { t, days, daysShort, getLang };
-export default { t: t, days: days, daysShort: daysShort, getLang: getLang };
+/* 只导出 t：页面文案全部走 t('key')，days/daysShort 与 export default 已删。 */
+export { t };

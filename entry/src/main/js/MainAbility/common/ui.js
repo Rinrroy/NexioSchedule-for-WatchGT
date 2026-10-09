@@ -268,10 +268,3 @@ export {
   statusOf, startText, endText, timeRange, sectionsText, hit, pointOf, ease,
   setOffset, offsetX, offsetY, rect, drawIcon, curPctOf, drawRing
 };
-export default {
-  hexA: hexA, roundRect: roundRect, tw: tw, ctext: ctext, ltext: ltext, ellipsize: ellipsize,
-  statusOf: statusOf, startText: startText, endText: endText, timeRange: timeRange,
-  sectionsText: sectionsText, hit: hit, pointOf: pointOf, ease: ease,
-  setOffset: setOffset, offsetX: offsetX, offsetY: offsetY, rect: rect,
-  drawIcon: drawIcon, curPctOf: curPctOf, drawRing: drawRing
-};

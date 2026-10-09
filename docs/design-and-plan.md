@@ -48,7 +48,7 @@
 - 已删除的编辑链路（grep 0 匹配）：`drawEdit`、编辑浮层、`index.hml` 的三个 `<input>`、`index.css` 的 `.editor/.inp`、`dispatch` 的 `addCourse/editRow/saveCourse/delCourse/cancelEdit`、业务方法 `newDraft/addCourse/openEdit/publishDraft/onName/onTeacher/onPlace/eventValue/saveCourse/delCourse/cancelEdit`、state 的 `draft/isNew/editMode/confirmDelete`。
 - 课程详情页为只读页，只有「返回」（`pages/index/index.js:815 drawDetail`）。
 - 设置页只保留「当前周 / 总周数」两个可调项（`doStep` 仅处理 `1001/1011/1002/1012`）。
-- 数据入口只有两个：同步页的「立即同步 / 蓝牙发现手机端」（局域网 HTTP）与「导入内部文件 / 恢复示例数据」（`pages/index/index.js:912 drawSync`）。
+- 数据入口只有一个：同步页的「立即同步」（局域网 HTTP，`pages/index/index.js drawSync`）。第七轮起 BLE 发现与文件导入/导出三条入口已删除。
 - **数据范围**：同步只保留**当前周**的课程（`common/sync.js:42-67 collectWeek`），内存中的课程对象数与该周实际课数绑定、上限 `MAX_COURSES=12`。
 
 ## 3. 架构
@@ -74,24 +74,21 @@ entry/src/main/
 └── js/MainAbility/
     ├── app.js                        应用生命周期：onCreate/onDestroy 只打日志，不抛异常
     ├── i18n/{zh-CN,en-US}.json       文案表（{"strings":{...}}，**40 个键**，键名全 ASCII；zh-CN 1440 B / en-US 1322 B）
-    └── common/                       13 个模块（全部 ES5 + ES module）
-    │   ├── const.js      常量：HEAP_TIER_KB=512、MAX_COURSES=12（只缓存当前周）、MAX_INCOMING=200、协议名/版本/端口、色板、星期名、存储键、4 个 file URI
+    └── common/                       11 个模块（全部 ES5 + ES module；ble.js / seed.js / app.js / nav.js / remind.js 已删）
+    │   ├── const.js      常量：HEAP_TIER_KB=512、MAX_COURSES=16（只缓存当前周）、MAX_INCOMING=200、协议名/版本/端口、色板、星期名、3 个 storage 键
     │   ├── model.js      Course 数据模型 + 周次/时间逻辑（Course.kt 的忠实移植）
-    │   ├── store.js      全局状态 + 持久化（@system.file 存整表 JSON、@system.storage 存小标志）+ 同步落库
-    │   ├── app.js        单页内核：view/prevView + go(next,backTo)/backView()
-    │   ├── nav.js        路由结论记录点（只有注释 + export default {}，不提供任何路由函数）
-    │   ├── ble.js        蓝牙发现：@system.bluetooth 扫描手机端广播，从 data 解析 "ip:port"
-    │   ├── sync.js       局域网 HTTP 拉取（@system.fetch GET /schedule.json）+ payload 解析/导入
-    │   ├── remind.js     前台上课提醒：距上课 <=10 分钟时振动一次 + 文案（内存去重）
+    │   ├── store.js      全局状态（纯内存态）+ @system.storage 三个小标志（当前周 / 上次同步时间 / 同步地址）+ 同步落库
+    │   ├── sync.js       局域网 HTTP 拉取（@system.fetch GET /schedule.json）+ payload 解析（唯一同步通道）
     │   ├── ui.js         canvas 绘制与交互工具：圆角矩形、宽度估算、居中/截断、命中测试、坐标提取、缓动 LUT（ease）
     │   ├── date.js       日期工具：ISO<->ms、星期、天数差、hh:mm 解析、格式化
     │   ├── holiday.js    假期/调休：normalize / find / isHoliday / nameOf
-    │   ├── seed.js       内置示例数据：12 门课字符串表 + settings + times + holidays
+    │   ├── defaults.js   出厂兜底：空 settings + 标准作息表（无示例课程）
+    │   ├── icon.js       32 色调色板 + 整行 RLE 的 32×32 圆形图标点阵
     │   └── i18n.js       语言判定（@system.app.getInfo().language）+ t(key,n) 取词
     └── pages/index/
         ├── index.hml     仅 3 行：<div class="page"> 内一个 <canvas class="cv">（无 input、无浮层）
         ├── index.css     仅 .page / .cv 两条规则（.page 显式 flex-direction: column）
-        └── index.js      1269 行：8 个 drawXxx 自绘视图（home/today/week/detail/times/sync/settings/about）+ 视图栈 open/back/jump + 命中矩形分发 + 表冠/方向手势/列表滚动 + 同步/导入调度
+        └── index.js      ~1,420 行：6 个 drawXxx 自绘视图（home/today/week/detail/sync/about）+ 视图栈 open/back/jump + 命中矩形分发 + 表冠/方向手势/列表滚动 + 同步调度
 ```
 
 ### 3.1 数据模型（与手机端逐字段对齐）
@@ -117,19 +114,19 @@ holidays = [ { date, endDate, name, type(0假期/1调休), followWeek, followWee
 
 ### 3.2 持久化策略（受 API 限制驱动）
 
-- `@system.storage` 单值 **< 128 字节**（技能与 SDK 注释）→ 只存四个小标志：
-  `nexio_ver`、`nexio_week`、`nexio_sync_at`、`nexio_sync_host`（`common/const.js:50-53`）。
-- 整表 JSON 里另存一个 `data_week`（`store.js:269` 输出、`:468` 回读），记录「内存里这
-  批课属于第几周」；0 表示未知/内置示例。第二轮新增。
-- 完整数据用 `@system.file.writeText/readText` 写到 `internal://app/nexio/schedule.json`
-  （`URI_DATA`）；读取分片进行：单次 `length:4096`、`rounds>24` 截断、6000 ms 兜底。
-- **降级链**：文件不可用 → 内存数据（本次会话有效，`fileOk=false` + `lastError='文件写入失败，数据仅本次运行有效'`）
-  → 内置示例数据（`common/seed.js`）；任何一步失败都只降级、不抛异常、不白屏。
-- 预览器/模拟器**无法执行 `@system.file`**（技能明确）→ 这部分在 review.md 标
-  "**未知，真机阻塞**"。
-- 四处 IO 兜底 `setTimeout`（`store.js` 的 `readAllText` 6000 ms / `readText` 3000 ms /
-  `writeText` 5000 ms / `load` 4000 ms）在 `finish()` 里都补了 `clearTimeout`，避免回调
-  已返回后定时器仍触发第二次（第二轮新增）。
+**第七轮（m09613）起持久化策略只剩一层：`@system.storage` 三个小标志 + 纯内存态。** 理由是堆：
+
+- `@system.storage` 单值 **< 128 字节**（技能与 SDK 注释）→ 只存三个小标志：
+  `nexio_week`、`nexio_sync_at`、`nexio_sync_host`（`common/const.js`；`nexio_ver` 已随版本键删除）。
+- 课表本体**不再落盘**。原先的 `@system.file` 通道（`URI_DATA` 整表 JSON + 分片 `readText`
+  24 轮 × 4096 + `parts.join('')` + `JSON.parse`）是**启动期最大单笔 JS 堆峰值**（要在堆里拼
+  出 65 KB 字符串，再解析成对象），而且全工程 `grep '.save('` **0 命中**——写盘从来没有调用者。
+  ⇒ 整条通道连同 `dirOf/readAllText/readText/writeText/save/toJson` 一并删除。
+- 每次冷启动都由 `onShow → autoSync` 走局域网 HTTP 重新拉取（`sync.js manualPull`）；没有网络时
+  首页显示空态与「未同步」，不显示过期数据。
+- 内存里的 `state.dataWeek` 仍记录「这批课属于第几周」，用于判断缓存是否过期
+  （`store.dataIsCurrentWeek()`），只是不再持久化。
+- `load()` 的兜底 `setTimeout`（4000 ms）仍配 `clearTimeout`（第二轮新增的守卫保留）。
 
 ## 4. UI 设计（MiUiX 视觉语言 → 轻智能表可落地子集）
 
@@ -184,20 +181,22 @@ MiUiX 是 Compose Multiplatform 组件库，**不能**在 lite 上运行；这�
 
 - 排版安全区：内容 x 从 56 到 `W-56`（左右各留 56px），顶部 40px / 底部 58px 起按钮；顶部标题行与底部导航按圆弦内缩（标题 x=104、右边界 350）。
 
-### 4.1 内部视图与交互（8 个视图，全部绘制在同一个 canvas 上）
+### 4.1 内部视图与交互（6 个视图，全部绘制在同一个 canvas 上）
 
-`VIEWS = ['home','today','week','detail','times','sync','settings','about']`（`pages/index/index.js:105`），无 edit 视图。
+`PAGE_ORDER = ['home','today','week','sync','about']` + 二级页 `detail`（`pages/index/index.js:150`）。
+**`times`（作息）与 `settings`（设置）两个视图已在第五轮删除**（m08330：全部接受手机端同步，避免内存溢出），
+现在的视图集合是 home / today / week / detail / sync / about，无 edit 视图。
 
-0. **home（默认，打开即此页）**：顶部「今天是<星期>」与时钟；中央大环（环心 `done/total` + 「节已完成」，达成率补间）；当前/下一节课摘要（进行中 / N 分钟后上课 / 无课 / 假期；数据不是当前周时补一行「缓存为第 N 周，请重新同步」）；右侧 7 个竖排页面指示点（可点击直达）；底部提示「上滑今日课表 · 左滑关于」与 今日/周/设置 三胶囊。详见 §4.5。
+0. **home（默认，打开即此页）**：顶部「今天是<星期>」与时钟；中央大环（环心 `done/total` + 「节已完成」，达成率补间）；当前/下一节课摘要（进行中 / N 分钟后上课 / 无课 / 假期；数据不是当前周时补一行「缓存为第 N 周，请重新同步」）；四行信息面板（本周 / 今日课程 / 下一节 / 数据）；底部提示「上滑今日课表 · 左滑关于」与 今日/周/i 三胶囊。**右侧竖排指示点已在第四轮删除**（m06685：没和边框对齐，删掉）。详见 §4.5。
 1. **today**：顶部星期/时钟 + 前一天/后一天 chip + 日期；进度环（环心显示 `done/total`）+ 周次/同步状态 + 今日完成数 + 刷新按钮；下面最多 3 张 76px 高课程卡（色条 + 课程名 + 时间 + 节次·地点·教师 + 状态），超过 3 张可滚动；底部三胶囊：周课表 / 设置 / i。假期显示假期名卡，无课显示空态卡（文案「课表来自手机端同步」）。
 2. **week**：标题 + 起止日期；四个 chip（整周 / 上一周 / 返回 / 下一周）；7 行固定 42px 行距（周一~周日 + 前 2 门课 + 日期），今日行高亮；整行可点进当日。
 3. **detail（只读）**：课程名/周次·星期/状态面板 + 四行（时间/节次/地点/教师）；**只有「返回」按钮**，无编辑/删除。
 4. **times**：作息名 + 总节数 + 节次时间列表（左侧色条区分 上午/下午/晚上）；总节数超过 6 行时 `scrollTopRow/scrollRows` 可滚动，右侧画轨道 + 滑块，提示「旋转表冠滚动」。
-5. **sync**：课程数与来源 + 六行（同步地址 / 立即同步 / 蓝牙发现手机端 / 导入内部文件 / 导出到内部文件 / 恢复示例数据）+ 提示行 + 达上限提示 + 返回。
-6. **settings**：六行 —— 当前周（步进）、总周数（步进）、上课提醒（开关）、作息时间、同步与导入（显示地址）、关于（`v1.0.0 · 512KB`）。
-7. **about**：紫色 N 图标 + 应用名 + 版本；四行关于信息；同步时间与地址；返回 / 退出（`this.$app.terminate()`）两个按钮。
+4. **sync**：课程数与来源 + **两行**（同步地址 / 立即同步）+ 说明行「仅通过局域网从手机端同步」+ 提示行 + 返回。
+   第七轮删掉了 BLE 行与导入/导出两行（详见 §5）。
+5. **about**：圆形 N 图标 + 应用名 + 版本（`v1.0.2 · 512KB`）；四行关于信息；同步时间与地址；返回（中性灰）/ 退出（暗红 + 「再点一次退出」二次确认，`K.app.terminate()` 失败则回首页并提示「本机不支持退出」）。
 
-> 表端只读：课程数据只来自手机端同步或内部文件导入；本轮已删除全部编辑/添加入口，见 §2.1。
+> 表端只读：课程数据只来自手机端同步；已删除全部编辑/添加入口，见 §2.1。
 
 ### 4.2 实测出来的硬约束（本次移植踩过的坑）
 
@@ -338,11 +337,20 @@ if (!store.dataIsCurrentWeek()) {
 | 联动重拉真实往返 | 依赖真机 HTTP（§7 待办 11） | 未知·待真机 |
 | 收尾构建/审计/内存 | BUILD SUCCESSFUL 8.5 s / 7.9 s；FAIL=0、WARN=2、PASS=12；117,027 B；115992 / 116088 B | 已实测 |
 
-## 5. 手机同步方案：「蓝牙发现 + 局域网 HTTP + 文件通道」
+## 5. 手机同步方案：只有局域网 HTTP 一条通道
 
-已确认本机 SDK **没有** `@system.wearengine`（历史白屏 bug 的直接原因），
-且 `@system.bluetooth` **只有 4 个静态方法，没有 GATT/连接/特征读写**，所以三段式的分工是：
-**蓝牙只负责"发现地址"，数据走局域网 HTTP，离线时走文件通道。**
+已确认本机 SDK **没有** `@system.wearengine`（历史白屏 bug 的直接原因）。
+::: warning 第七轮（m09613）本节的通道裁剪
+原本设计的三段式（**蓝牙发现地址 → 局域网 HTTP 传数据 → 离线走文件通道**）已删到只剩中间一段：
+
+| 原通道 | 结论 |
+| --- | --- |
+| 蓝牙广播发现地址 | **删除**。`@system.bluetooth` 在本引擎的模块表 `ohos_module_config.h:97-158` 里**根本没有条目**，`requireNative` 只能得到 `undefined` ⇒ 这条通道从来没有生效过（`typeof` 守卫能防抛错，防不了静态 `import` 被编进 bundle） |
+| 文件通道（import / rawfile / export） | **删除**。表端没有文件管理器可放文件；`entry/src/main/resources/rawfile/` 一直是空目录；读盘是启动期最大堆峰值（见 §3.2） |
+| 局域网 HTTP | **保留，且是唯一通道**。手机端 `WatchSyncServer.kt` 已经在跑，地址改为在同步页手动选择 |
+
+下面 5.1–5.3 保留**历史设计记录**，便于回溯当时为什么这么想；实现已按上表裁剪。
+:::
 
 ### 5.1 第一段：蓝牙发现（只扫描广播，不传数据）
 
@@ -386,13 +394,12 @@ if (!store.dataIsCurrentWeek()) {
   `Cache-Control: no-store`；`status()` 返回形如
   `"HTTP 服务 192.168.1.5:8787 · BLE 广播中(NEXIO|ip:8787)"`。
 
-### 5.3 第三段：文件通道（离线备用）
+### 5.3 第三段：文件通道（**已删除**，仅存档历史设计）
 
-- `internal://app/import/nexio_schedule.json`（`URI_IMPORT`）：用 `hdc file send` 推入后，
-  在同步页点「导入内部文件」读取（`index.js:1217 doImport()` 先试 import，失败再试 rawfile）。
-- `internal://app/rawfile/nexio_schedule.json`（`URI_RAW`）：随包内置的种子数据
-  （**当前 `entry/src/main/resources/rawfile/` 目录为空，尚未放入**）。
-- 导出：`internal://app/nexio/export.json`（`URI_EXPORT`，同步页「导出到内部文件」）。
+- `internal://app/import/nexio_schedule.json`（`URI_IMPORT`）、
+  `internal://app/rawfile/nexio_schedule.json`（`URI_RAW`）、
+  `internal://app/nexio/export.json`（`URI_EXPORT`）三个 URI 与其读写实现
+  已在第七轮整体删除（`const.js` 里只剩过时的注释，实现与 `@system.file` import 全无）。
 - 服务端状态：`WatchSyncServer.kt` **已存在（573 行）**，不是"计划中"；公开 API 为
   `start(context)` / `stop()` / `isRunning()` / `currentIpAddress()` / `status()`。
 
@@ -443,7 +450,7 @@ if (!store.dataIsCurrentWeek()) {
   原始条数超 `MAX_INCOMING=200` 先截断（`:97`）；`courses` 为空或全部无效（`dayOfWeek` 不在 1..7）时拒收；
   再经 `collectWeek` 只保留目标周、上限 `MAX_COURSES=12`；目标周取不到时回退手机端 `current_week`（`:100-111`）。
 - 手表 → 手机端方向：`store.toJson()`（`store.js:263-296`，额外输出 `data_week`）输出同构 JSON，
-  经「导出到内部文件」写到 `internal://app/nexio/export.json`。
+  经「导出到内部文件」写到 `internal://app/nexio/export.json`（**该路径与实现已在第七轮删除**）。
 
 ## 6. 内存基线与两个历史 bug
 
@@ -477,7 +484,7 @@ if (!store.dataIsCurrentWeek()) {
   页面 JS 整体加载失败 → 白屏（记录在 `common/nav.js:14`、`common/sync.js:4`）。
 - 修复规则（已写入代码约束）：
   1. 任何 `@system.*` 导入前先确认该 `.d.ts` 存在于本机 SDK；lite 代码禁止 wearengine。
-  2. 生命周期钩子内不做可能抛异常的初始化；所有 IO/网络/蓝牙/振动调用包在 `try/catch` 里，
+  2. 生命周期钩子内不做可能抛异常的初始化；所有 IO/网络调用包在 `try/catch` 里，
      失败只更新 UI 状态。
   3. 页面首屏渲染不依赖 IO：先用内置数据渲染，IO 完成后再 `redraw()`；
      渲染整体再包一层 `try/catch`，异常走 `drawError` 给出可返回的兜底画面。
@@ -512,13 +519,13 @@ if (!store.dataIsCurrentWeek()) {
 
 | # | 事项 | 证据 |
 | --- | --- | --- |
-| 1 | 单页架构改造：`config.json` 只留 `pages/index/index`，8 个内部视图落在同一 canvas | 构建产物只有 1 个页面 JS；8 视图抓帧 |
-| 2 | 数据层：`model.js` 移植 Course.kt + `store.js` 持久化/降级链 + `seed.js` 12 门种子课 | 源码 + 模拟器渲染 |
+| 1 | 单页架构改造：`config.json` 只留 `pages/index/index`，内部视图落在同一 canvas（现为 6 个） | 构建产物只有 1 个页面 JS；各视图抓帧 |
+| 2 | 数据层：`model.js` 移植 Course.kt + `store.js` 内存态状态机（`seed.js` 种子与 `@system.file` 落盘已在第五/七轮删除） | 源码 + 模拟器渲染 |
 | 3 | 6 个引擎坑全部规避（flex column / stack 浮层 / this.x 绑定 / input type / build.log 排查 / canvas 取代 HML 节点） | 本文 §4.2 表 + review.md「发现与改动」 |
-| 4 | 8 个视图全部实现并注入点击验证：首页（大环 + 指示点）/ 今日（进度环）/ 周课表 / 详情（只读）/ 作息（可滚动）/ 同步 / 设置（周数步进、提醒开关）/ 关于 | `docs/screenshots/*.jpg` 四张归档图 + `.dsh-tmp/png-last/z*.png`、`pngW/f11.png`、`shots-nwB/s0.jpg` |
-| 5 | 蓝牙发现模块 `common/ble.js`（`typeof` 守卫 + 明文/十六进制双形态解析 + 超时回退） | 源码 + `@system.bluetooth` @since 6 与权限声明 |
+| 4 | 视图全部实现并注入点击验证：首页（大环）/ 今日（进度环）/ 周课表 / 详情（只读）/ 同步 / 关于（作息与设置页已删） | `.dsh-tmp/png-last/z*.png`、`pngW/f11.png`、`shots-nwB/s0.jpg`、第七轮 `.dsh-tmp/frames-v7/v8` |
+| 5 | ~~蓝牙发现模块 `common/ble.js`~~ **已在第七轮删除**：`@system.bluetooth` 在本引擎模块表里没有条目，`requireNative` 只能得到 `undefined` | 引擎源码 `ohos_module_config.h:97-158` + 第七轮删除提交 |
 | 6 | 局域网 HTTP 同步 `common/sync.js` + `store.syncUrl()` 地址规范化 + 自动同步 | 源码 + 协议审计 |
-| 7 | 文件通道：import / rawfile / export 三个 URI 与读取失败降级 | 源码（真机读写未验证） |
+| 7 | ~~文件通道：import / rawfile / export 三个 URI~~ **已在第七轮删除**（表端无文件管理器可放文件，rawfile 目录一直为空） | 第七轮删除提交 |
 | 8 | 内存基线抬到 512 KB / `MAX_COURSES=12`（只缓存当前周），同时以 64 KB 模拟器作下限回归 0 OOM | `const.js:10/:16` + `sim-fin-*` 日志 |
 | 9 | i18n：中英双语文案表 + `app.getInfo().language` 判定 | `i18n/*.json` + 模拟器 `-l zh_CN` |
 | 10 | 手机端 `WatchSyncServer.kt`（HTTP 服务 + BLE 广播 + IP 轮询） | 源码 573 行，已存在 |
@@ -532,7 +539,7 @@ if (!store.dataIsCurrentWeek()) {
 | 18 | **只缓存当前周**：`collectWeek` 用 probe 预筛（`isActiveInWeek` 命中才 `normalizeCourse`）、`MAX_COURSES` 24→12、`MAX_INCOMING=200` 截断 | `.dsh-tmp/pnghmC/*.png`（首页课程摘要与周次）+ 源码 `sync.js:42-135` |
 | 19 | **首页（home）**：打开即此页 + 大环 227,150/r60/lw13 + 右侧 7 个可点击指示点 + 今日/周/设置三胶囊 + 数据非当前周时的过期提示 | `.dsh-tmp/pnghmC/f9.png`；点击直达 `.dsh-tmp/pngNav3/grid.png` |
 | 20 | **首页分方向手势**：左滑→关于、右滑→设置、上滑→今日课表、下滑→周课表 | `.dsh-tmp/pngGestures/grid.png`、`.dsh-tmp/pnggDown2/f10.png` |
-| 21 | **视图栈返回**：`open/back/jump/pageTurn` 取代旧的直接改 `this.view`；`footerBack` 默认 action 改为 `back`，`openCourse` 走 `open('detail')` | 源码 `index.js:265-310`、`:421-427`、`:1144-1152` + 导航抓帧 |
+| 21 | **视图栈返回**：`open/back/jump/pageTurn` 取代旧的直接改 `this.view`；`footerBack` 默认 action 改为 `back`，`openCourse` 走 `open('detail')` | 源码 + 导航抓帧 |
 | 22 | `store` 四处 IO 兜底 `setTimeout` 补 `clearTimeout`；`dataWeek`/`data_week` 记录这批课属于第几周 | 源码 `store.js:48/:87/:101-110/:269/:306-474` |
 | 23 | 修复 `drawHome` 误调 `st.dataIsCurrentWeek()` 导致首页抛 `Expected a function` 并回落错误页 | 改为 `store.dataIsCurrentWeek()/store.dataWeekLabel()`；`drawError` 兜底链路实测生效 |
 
@@ -540,18 +547,18 @@ if (!store.dataIsCurrentWeek()) {
 
 | # | 事项 | 阻断项 | 备注 |
 | --- | --- | --- | --- |
-| 1 | **真机验证 BLE 扫描**：GT5/GT6 上 `startBLEScan`/`subscribeBLEFound` 能否拿到手机端广播，`data` 是明文还是十六进制 | 是（`@system.bluetooth` 在模拟器为 undefined） | 决定第一段是否可用 |
+| 1 | ~~真机验证 BLE 扫描~~ **已作废**（第七轮删除该通道：`@system.bluetooth` 在本引擎模块表里没有条目） | — | 见 §5 的通道裁剪表 |
 | 2 | **真机验证 HTTP 拉取**：`GET http://<host>:8787/schedule.json` 是否通。`ohos.permission.INTERNET` **已声明**（`config.json`，system_grant/normal，SDK 声明表 PermissionDefinitions.json:1738） | 是 | `.d.ts` 无 `@permission` 标注，故属防御性声明 |
-| 3 | **真机验证 `@system.file` / `@system.storage`**：rawfile / import 读取与内部写入、四个小标志读写 | 是 | 模拟器不执行该模块，技能明确 |
+| 3 | **真机验证 `@system.storage`**：三个小标志（当前周 / 上次同步时间 / 同步地址）读写（`@system.file` 通道已在第七轮删除） | 是 | 模拟器不执行该模块，技能明确 |
 | 4 | **GT2 兼容回退**：`MAX_COURSES` 由 16 降到 **8** 并在 64 KB 机型验证 | 否（资料支持/未知） | 改一个常量即可（`common/const.js:19` 注释原文「64KB 档（GT2 等）请改 8」） |
-| 5 | **手机端 WatchSyncServer 联调**：BLE 广播与 HTTP 同机联调，确认 `NEXIO|ip:port` 解析与 `/ping` 探活 | 否 | 服务端已实现，缺端到端联调 |
-| 6 | rawfile 内置种子：把 `nexio_schedule.json` 放进 `resources/rawfile/`（**当前目录为空**） | 否 | 届时需真机确认读取 |
-| 7 | 真机验证振动（权限弹窗、时长、强度）与 466×466 圆屏字号/安全区 | 否 | 模拟器只验证 454×454 |
-| 8 | 真机压测：`MAX_COURSES=12` + 大文件导入峰值、长时间运行、反复进出页面（蓝牙订阅是否真正停止） | 否 | 当前只有静态估算 |
+| 5 | **手机端 WatchSyncServer 联调**：HTTP 同机联调，确认 `/ping` 探活与 `/schedule.json?week=N` 拉取 | 否 | 服务端已实现，缺端到端联调 |
+| 6 | ~~rawfile 内置种子~~ **已作废**（第五轮去种子、第七轮删文件通道） | — | 数据全部来自手机端同步 |
+| 7 | 真机验证 466×466 圆屏字号/安全区（振动通道与权限已在第七轮删除） | 否 | 模拟器只验证 454×454 |
+| 8 | 真机压测：`MAX_COURSES=16` + 长时间运行、反复进出页面 | 否 | 当前只有静态估算与模拟器堆档位扫描 |
 | 9 | **表冠 `pageTurn` 真机验证**（第二轮新增阻断项）：模拟器无法注入表冠事件，`onCrown`/`crownTurn`/`pageTurn` 的分派与首页环形翻页、以及 16 度/档手感均未在硬件验证 | 是（模拟器不支持） | 真机需确认顺时针方向与灵敏度 |
 | 10 | **首页在 64 KB 档的峰值**：本轮 ack 为 512 KB 档配置，GT2 的 64 KB 档未测 | 否 | 与 #4 一起做 |
 | 11 | **改周次后的联动重拉真机验证**：`doStep` 的 `weekChanged → doSync()`（`index.js:1169`）在真机走通需 HTTP 可用，模拟器只验证到「缓存标记变为过期 + 首页提示」这一半 | 是（依赖 #2） | 依赖真机 HTTP；`pngwk1`、`pngwk4` 为模拟器半程证据 |
-| 12 | **真机安装必须使用 release 构建**（第三轮新增阻断项）：真机对**每个 `.js` 文件**限长 49,152 B 且硬拒绝；debug 构建永不压缩（hvigor 用 `targetService.isDebug()` 决定 `hapMode`），debug 的 `app.js` = 72,094 B 必然超闸 ⇒ 只能装 `-p buildMode=release` 的包（本轮实测 release `app.js` 42,400 B / `pages/index/index.js` 29,057 B），装 debug 包会整屏黑 | 是（真机硬闸） | 守门脚本 `NexioWatch/tools/check-lite-size.ps1`；详见 review.md「第三轮」 |
+| 12 | **真机安装仍建议使用 release 构建**（第三轮新增阻断项，第七轮修正）：真机对**每个 `.js` 文件**限长 49,152 B 且硬拒绝；debug 构建永不压缩（hvigor 用 `targetService.isDebug()` 决定 `hapMode`）。第七轮删掉无用通道后 debug `app.js` 从 69,750 B 降到 **48,228 B**，**首次也落在闸内**（余量仅 924 B）；release 为 `app.js` 28,724 B / 页面 25,227 B（余量 20,428 / 23,925），仍应优先 | 是（真机硬闸） | 守门脚本 `NexioWatch/tools/check-lite-size.ps1`（release exit 0）；详见 review.md「第三轮」与「第七轮」 |
 | 13 | **真机复测软重启是否消失**（第六轮新增阻断项）：本轮修的是四个「主线程被长时间占用 + 堆峰值」缺陷（字体日志风暴 868→0、动画定时器改按真实时间 + 硬上限、每帧开销、读文件上限 65,536 字符），模拟器侧 48 次连滑无卡死；真机需实测打开应用后是否还软重启，并用 `hdc` 抓 hilog 确认无 `ERR_OUT_OF_MEMORY` / `JS HEAP OOM` | 是（真机） | 详见 review.md「第六轮」与本文 §13 |
 | 14 | **已签名包安装验证**（第六轮新增）：`entry-default-signed.hap`（289,197 B，DevEco 生成的调试签名 profile，bundle `com.haooz.chedule`，有效期至 2027-10-09）能否在 GT5/GT6 正常安装与启动 | 是（真机 + 账号） | `build-profile.json5` 含本机绝对路径与口令，**不入库** |
 
@@ -559,10 +566,12 @@ if (!store.dataIsCurrentWeek()) {
 
 | 层级 | 手段 | 结果 |
 | --- | --- | --- |
-| 静态审计 | `scripts/audit_lite_watch_project.ps1 -ProjectPath NexioWatch -TargetHeapKB 512 -TargetApi 6 -SdkApiPath D:/DevEco Studio/sdk/default/openharmony/js/api` | 通过；2 条 REAL-DEVICE REQUIRED（振动、`@system.file`/rawfile）；收尾复核 JS=15 文件 **117,027 字节**（先前 116,844 B、第一轮 101,585 B）；**FAIL=0 / WARN=2（均为 REAL-DEVICE REQUIRED：振动、`@system.file`/rawfile）/ PASS=12**；**Timers create=8 / clear=8**（清理点：`index.js:178 stopTick`、`index.js:510 stopRingAnim`、`ble.js:70`、`store.js` 四处 guard、`sync.js:149 pull` 的 guard）、**Subscriptions subscribe=1 / unsubscribe=1**。详见 review.md「验证结果」 |
-| 构建 | 设置 `DEVECO_SDK_HOME` 后执行 hvigorw `--mode module -p product=default assembleHap --no-daemon` | 第二轮 **BUILD SUCCESSFUL**（增量约 6.3 s，未签名，`signingConfigs` 为空）；收尾又连续两次 **BUILD SUCCESSFUL**（8.5 s / 7.9 s，26 tasks）；更早为 `COMPILE RESULT:SUCCESS` + `BUILD SUCCESSFUL in 7~9 s`，产物 1,095,772 B unsigned HAP |
-| 页面渲染 | `Simulator.exe`（454×454 圆形）+ WebSocket 抓帧 + 命名管道注入点击/拖拽（`.dsh-tmp/tap.js`、`.dsh-tmp/drag.js`） | 8 个内部视图全部渲染、0 次 OOM；第二轮运行期内存 ack：totalBytes 524280 / allocBytes 113224 / peakAllocBytes 118760（收尾复测 115992 / 116088）；分方向手势、指示点与胶囊直达均已抓帧。**表冠无法注入**，`crownTurn/pageTurn` 只有静态正确性 |
-| 真机 | 签名 HAP 安装到 GT5 / GT6（用户侧） | **未运行**，见 §7 待办 1~3、7、8 |
+| 静态审计 | 12 个 `.js` 全部 `node --check`（拷成 `.mjs` 到 `.dsh-tmp/chk/`）；禁用语法与残留符号扫描 | 第七轮：**syntax fails = 0 / 12**；`KEY_VERSION`/`URI_DATA`/`SYNC_POLL_MS`/`days_short` **0 命中**；`export default` 只剩 3 处且都必需（`app.js` app VM、`const.js` 被 `model.js` 默认导入、`pages/index/index.js` 页面 VM）；`ctx.font` 全项目仅 `setFont` 内部 1 处 |
+| 构建 | 设 `DEVECO_SDK_HOME` 后 hvigorw `--mode module -p product=default assembleHap --no-daemon`（真机另加 `-p buildMode=release`） | 第七轮 debug 与 release **均 BUILD SUCCESSFUL**（exit=0）：debug `app.js` **48,228 B** / 页面 **41,622 B**；release `app.js` **28,724 B** / 页面 **25,227 B**，`.bc` 25,180 / 20,652。守门脚本 `tools/check-lite-size.ps1` **exit 0**。双构建脚本 `.dsh-tmp/build3.ps1` |
+| 尺寸守门 | `tools/check-lite-size.ps1` 读 `loader_out_lite/default/js/MainAbility` 下 `app.js` 与 `pages/index/index.js`，任一 > 49,152 即 `exit 1` | 第七轮 release **exit 0**（`[ OK ] app.js = 28724 B, 20428 B of headroom` / `[ OK ] pages\\index\\index.js = 25227 B, 23925 B of headroom`）；debug 本轮也首次合规（余量 924 / 7,530） |
+| 页面渲染 | `Simulator.exe`（454×454 圆形）+ WebSocket 抓帧 + 命名管道注入点击/拖拽 | 第七轮用 `.dsh-tmp/verify7.js`（**一次 WS 全程抓帧**，规避「WS 存活 4–8 s 后引擎崩溃」）：首页 / 今日 / 周课表 / 同步 / 关于全部抓帧正常（`.dsh-tmp/frames-v7`、`frames-v8`），运行期内存 ack totalBytes 524280 / allocBytes 87496 / peakAllocBytes 87728。**表冠无法注入**，`crownTurn/pageTurn` 只有静态正确性 |
+| 堆档位 | `.dsh-tmp/heapsweep.js <KB列表>`：逐档起模拟器，判定 `app=/page=/render=/alive=/OOM=`（`-hs` 直通 jerry 堆字节数） | 第七轮：改前 92 KB OOM、96 KB 通过；**改后 80 KB OOM、88 KB 通过** ⇒ 启动净需 ≈96 KB → ≈88 KB（OOM 账单见 `.dsh-tmp/sim-hs80.log:33-47`） |
+| 真机 | 签名 HAP 安装到 GT5 / GT6（用户侧） | **未运行**，见 §7 待办 2、3、7、8、9 与 §14.4 |
 
 ## 9. 里程碑
 
@@ -573,7 +582,7 @@ if (!store.dataIsCurrentWeek()) {
 - M5 内存基线抬到 GT5/GT6 512 KB、`MAX_COURSES=12`（只缓存当前周），并保 64 KB 下限回归 —— **完成**
 - M6 静态审计 + 全视图注入点击截图 + 两份文档 —— **完成（真机项除外）**
 - M7 四合一 UI 重构（去编辑 / 版式重排 / 活动记录式进度环 / 表冠 / 作息滚动）—— **完成（模拟器已验证；表冠与动效待真机）**
-- M8（用户）真机安装：表冠、BLE 扫描、HTTP 拉取、`@system.file` 读写、振动、466×466 显示 —— **待用户**
+- M8（用户）真机安装：表冠、HTTP 拉取、`@system.storage` 读写、466×466 显示 —— **待用户**（BLE 扫描、`@system.file` 读写、振动三条通道已在第七轮删除）
 - M9 第二轮：当周课程内存控制 + 活动记录式首页 + 分方向手势 + 视图栈返回 —— **完成（模拟器已验证；表冠 `pageTurn` 与 64 KB 档峰值待真机）**
 - M10 第二轮收尾修正：改周次即判定缓存过期并联动重拉（`doStep` + `index.js:1169`）、首页缓存过期提示优先于「下一节」（`index.js:578-585`）、`sync.js pull()` 兜底定时器成对清理 —— **完成（模拟器已验证；联动重拉的真机往返见 §7 待办 11）**
 ## 10. 第三轮（2026-10-09）：单文件 49,152 B 硬闸与 release 构建要求
@@ -722,3 +731,42 @@ if (!store.dataIsCurrentWeek()) {
 | 20 | **已签名包装机验证**：`entry-default-signed.hap` 在 GT5/GT6 上的安装与启动 | 是（真机） | profile 为 debug 类型、一年有效期，正式发布需在 AGC 申请发布证书 |
 
 - **M14 第六轮：字体日志风暴 + 动画定时器无上限 + 每帧重复开销 + 读文件上限 四处优化，字体 WARN 868 → 0、48 次连滑压力测试无卡死、release 签名包产出（289,197 B）、版本升 v1.0.2 —— 完成（模拟器侧；真机判据见 §13.4）**
+
+## 14. 第七轮（2026-10-10）：真机仍软重启（m09613）——删净无用同步通道 + 运行期减堆
+
+用户反馈（逐字）：「还是软重启尝试一下把其他用不到的同步方式删干净」。第六轮只消除了字体日志风暴与动画欠帧，真机仍软重启；本轮同时处理「删干净」与「降堆」。
+
+### 14.1 反馈与处置
+
+| # | 反馈 | 根因 | 处置 |
+| --- | --- | --- | --- |
+| ① | 真机**仍软重启** | 唯一会触发系统重启的路径是 **jerry 自身 fatal**：`fatal_handler.cpp:90-95` 把 `HandleFatal` 注册给 `jerry_port_default_set_fatal_handler`；`:53-81` 命中后 `ProductAdapter::SendTerminatingRequest(GetCurrentAbilityToken(), true)` 通知 AMS 拆掉应用，系统随即重新拉起。**引擎不会自造 fatal**（`SetFatalError(` 全仓库仅两处调用），触发者是 jerry 的 `JERRY_FATAL_OUT_OF_MEMORY` 一类 | 本机无法复现（模拟器非设备同款引擎配置），改为**压缩启动期/运行期堆占用**保守收敛：删整条无用通道 + 删死代码 + 去重复分配 |
+| ② | 删干净用不到的同步方式 | `@system.bluetooth` 在引擎模块表 `ohos_module_config.h:97-158` 里**没有条目**，`requireNative` 只能拿到 `undefined` ⇒ BLE 扫描本来就是死码；`entry/src/main` 下也**没有 rawfile 目录**；`@system.file` 读盘要在 JS 堆里拼 65 KB 字符串再 `JSON.parse` | 删 `common/ble.js` 整个文件；删文件导入/导出（`URI_IMPORT/URI_RAW/URI_EXPORT`、`readImportFile/readRawFile/exportToFile`、`sync.importText`、页面 `doImport/applyImport/doExport`）；连 `@system.file` 落盘通道整体删除（全工程 `grep '.save('` **0 命中**）；持久化只留 `@system.storage` 三个小标志 |
+| ③ | （同①）堆峰值 | 92 KB 堆下 OOM 的内存账：byte code 44,160 / strings 20,678 / objects 7,752 / properties 14,080 | 删 9 个模块的 `export default`（全工程唯一默认导入是 `model.js → const.js`，其默认对象进一步只留真正取用的 3 个键）；删全部死导出/死函数；页面 `this.taps = []` → `this.taps.length = 0`；删已无引用的 `common/img/app_icon.png` |
+| ④ | 权限表残留 | `config.json` 仍声明 VIBRATE / ACCESS_BLUETOOTH / DISCOVER_BLUETOOTH 三条，但源码里 `vibrator|VIBRATE|@system.bluetooth` 全 0 命中 | 只留 `ohos.permission.INTERNET`（config.json 1425 B → 949 B） |
+
+### 14.2 引擎约束（本轮新增，写 Lite 代码必须遵守）
+
+- **唯一软重启通道**是 jerry fatal → `fatal_handler.cpp` → `SendTerminatingRequest(token, true)`；`EXCE_ACE_PAGE_FILE_TOO_HUGE`（49,152 B 超闸）**只黑屏不重启**（`js_app_context.cpp:85-100` 直接 `return UNDEFINED`）。两者不要再混为一谈。
+- 设备侧**恒为 snapshot 模式**（`platform_adapter.cpp:41-48`：`#if (TARGET_SIMULATOR != 1) mode = true;`），`.bc` 与 `.js` 都会打进 HAP；模拟器两个 mode 函数都是空操作，**永远 parser 模式**，因此**本机无法用 .bc 复现真机堆账**（实测把 `.js` 删掉只留 `.bc` 会得到 `TypeError: Invalid snapshot version or unsupported features present`）。
+- `-hs <字节>` 直通 jerry 堆容量（OOM 报文的 `heap total size:` 与之相同）。这是本机**唯一**能调堆的旋钮，也是唯一能量化「启动净需堆」的手段。
+- `@system.bluetooth`/`@system.wearengine` 不在模块表里 ⇒ `requireNative` 返回 `undefined`，不会抛错；**但静态 `import` 仍会把它编译进 bundle**（多一份模块包装与字符串）。无用通道应连 import 一起删。
+- `export default {...}` 在每个模块求值时都要建一个对象并填属性，是**纯运行期堆分配**；没有默认导入的模块应整块删掉。
+
+### 14.3 尺寸、守门与堆档位（本轮三次构建）
+
+| 构建 | `app.js` | `pages/index/index.js` | 49,152 B 闸 |
+| --- | --- | --- | --- |
+| debug | **48,228 B** | 41,622 B | **首次两者同时合规**（+924 / +7,530） |
+| `-p buildMode=release` | **28,724 B** | **25,227 B** | +20,428 / +23,925；`app.bc` 25,180 / `index.bc` 20,652 |
+
+堆档位扫描（`.dsh-tmp/heapsweep.js`）：改前 92 KB OOM、96 KB 恰好够用；改后 **80 KB OOM、88 KB 通过** ⇒ 启动净需 **≈96 KB → ≈88 KB**（字节码 44,160 → 38,104，strings 20,678 → 18,738，objects 7,752 → 6,944，properties 14,080 → 11,744）。
+
+### 14.4 待办增量（接 §7、§12.4 与 §13.4）
+
+| # | 事项 | 阻断项 | 备注 |
+| --- | --- | --- | --- |
+| 21 | **真机复测软重启**：打开后长时间停留 + 多次翻页，`hdc` 抓 hilog 确认无 `ERR_OUT_OF_MEMORY` / `JS HEAP OOM` | 是（真机） | 若仍复现，说明真机堆比 88 KB 更紧或存在运行期增长点，下一步转向「按需分配 + 更激进的缓存裁剪」 |
+| 22 | 已签名包装机验证（第六轮遗留，包体因删通道变小） | 是（真机） | 需先在 DevEco 里重新出包 |
+
+- **M15 第七轮：删净 BLE/文件导入导出/文件落盘三条无用通道、权限表收敛到 INTERNET、9 个 export default 与全部死函数删除、页面减少每帧分配；debug 包首次同时满足 49,152 B 闸；启动净需堆 ≈96 KB → ≈88 KB —— 完成（模拟器侧；真机判据见 §14.4）**

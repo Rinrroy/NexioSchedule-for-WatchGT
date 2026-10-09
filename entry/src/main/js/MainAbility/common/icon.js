@@ -77,4 +77,3 @@ var ICON32 = {
 };
 
 export { ALPHA, ICON32 };
-export default { ALPHA: ALPHA, ICON32: ICON32 };

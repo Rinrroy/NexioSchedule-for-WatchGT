@@ -52,11 +52,11 @@
  *   （js_app_environment.cpp:85-89），而 JSFWK_TEST=1 只定义在模拟器的
  *   acelite_config.h:28-29。旧写法 var K = globalThis.NEXIO 在真机求值就抛
  *   ReferenceError，页面 eval 直接失败 → 整屏黑、连 onCreate 都不打。
- *   三条通道按可用性依次尝试：
+ *   两条通道按可用性依次尝试：
  *     1) getApp()  —— AppDataModule 注册的全局函数（app_data_module.cpp:25-68），
  *        0 参调用返回 app VM；该实现要求 app VM 上有 data 属性，否则返回 undefined。
  *     2) $app      —— 引擎在 app 求值后挂到全局对象上（js_app_context.cpp:182-191）。
- *     3) globalThis —— 仅模拟器兜底。
+ *   globalThis 兜底已删（m09613）：真机本就没有它，模拟器也可由 $app 覆盖。
  *   getApp() 只在模块顶层调用一次并缓存：引擎注释警告每次调用都会动引用计数，
  *   反复调用会走到 ERR_REF_COUNT_LIMIT（JS REF LIMIT）。
  *   typeof 对未声明的标识符不抛错，这是下面这段能在真机跑完的关键。 */
@@ -70,13 +70,11 @@ try {
 if (!K) {
   try { if (typeof $app !== 'undefined' && $app && $app.data) K = $app.data.NEXIO; } catch (e2) { K = null; }
 }
-if (!K && typeof globalThis !== 'undefined') K = globalThis.NEXIO;
 var store = K.store;
 var M = K.M;
 var D = K.D;
 var UI = K.UI;
 var SY = K.SY;
-var BLE = K.BLE;
 var t = K.t;
 var ICON32 = K.ICON32;
 var VERSION = K.VERSION;
@@ -198,7 +196,6 @@ export default {
     this.scrollTopRow = 0;
     this.scrollRows = 0;
     this.syncTried = false;
-    this.bleScanning = false;
     this.crownAcc = 0;
     this.crownBound = false;
     this.ringA = 0;
@@ -264,8 +261,6 @@ export default {
     this.stopCrown();
     this.ctx = null;
     this.fontKey = '';
-    /* 必须清理蓝牙订阅/定时器，否则离开页面后仍在扫描 */
-    try { BLE.stop(); } catch (e) { /* ignore */ }
   },
 
   /* ---------------- 计时与同步 ---------------- */
@@ -412,7 +407,8 @@ export default {
       this.fontKey = '';
     }
     var ctx = this.ctx;
-    this.taps = [];
+    /* 复用同一数组：每帧 new Array 会在 30s 定时器与过渡期里持续制造垃圾 */
+    this.taps.length = 0;
     ctx.fillStyle = C_BG;
     ctx.fillRect(0, 0, W, H);
     /* 任何视图绘制异常都不允许留下纯黑画面：捕获后画出可返回的错误提示。
@@ -565,8 +561,8 @@ export default {
      中心间距 65（=±65），左端 108 / 右端 346，四边留白对称（m06685 反馈“右侧点
      没和边框对齐、左右不对称”）。 */
   nav(ctx) {
-    /* 设置页已删除（m08330）：中间那枚改为「同步」。同步地址 / BLE 发现手机端 /
-       文件导入导出都要在这里操作，删掉设置页后必须有别的入口，否则首次配对无处可去。 */
+    /* 设置页已删除（m08330）：中间那枚改为「同步」。同步地址在这里改，
+       删掉设置页后必须有入口，否则首次配对无处可去。 */
     var labels = [t('btn_week'), t('btn_sync'), t('btn_info')];
     var targets = ['week', 'sync', 'about'];
     var w = 60;
@@ -591,11 +587,6 @@ export default {
   syncLabel() {
     var st = store.get();
     return st.lastSync > 0 ? (t('synced_at') + ' ' + this.clockOf(st.lastSync)) : t('not_synced');
-  },
-  bleLabel() {
-    if (this.bleScanning) return '扫描中…';
-    if (!BLE.available()) return '本机不支持';
-    return '开始扫描';
   },
   currentWeek() {
     var st = store.get();
@@ -1104,28 +1095,25 @@ export default {
   },
 
   /* ---------------- 同步 ---------------- */
-  /* ---------------- 同步 ---------------- */
 
   drawSync(ctx) {
     var st = store.get();
-    this.title(ctx, '同步与导入', 46);
+    this.title(ctx, '同步', 46);
     this.subtitle(ctx, st.courses.length + ' 门课 · 来源 ' + st.source, 68);
+    /* 只剩局域网一条通道（m09613）：蓝牙发现手机端、导入/导出内部文件三行已删。
+       「恢复示例数据」更早已删（m08330）——表端只读，数据只来自手机同步。 */
     var items = [
       ['同步地址', store.syncHostLabel() || '未设置'],
-      ['立即同步', this.syncLabel()],
-      ['蓝牙发现手机端', this.bleLabel()],
-      ['导入内部文件', ''],
-      ['导出到内部文件', '']
+      ['立即同步', this.syncLabel()]
     ];
-    /* 「恢复示例数据」已删除（m08330）：表端只读、数据只来自手机同步，
-       种子课表正是内存溢出与「看到别的周课程」的源头。 */
-    var acts = ['editHost', 'syncNow', 'bleScan', 'importFile', 'exportFile'];
+    var acts = ['editHost', 'syncNow'];
     var i;
     for (i = 0; i < items.length; i++) {
-      var y = 88 + i * 37;
-      this.row(ctx, ROW_X, y, ROW_W, 34, items[i][0], items[i][1]);
-      this.reg(ROW_X, y, ROW_W, 34, acts[i], 0);
+      var y = 128 + i * 50;
+      this.row(ctx, ROW_X, y, ROW_W, 44, items[i][0], items[i][1]);
+      this.reg(ROW_X, y, ROW_W, 44, acts[i], 0);
     }
+    this.ctext(ctx, '仅通过局域网从手机端同步', W / 2, this.textY(254, 12), 12, C_DIM);
     var msg = this.tip ? this.tip : (st.syncError ? st.syncError : '');
     if (msg) {
       this.ctext(ctx, UI.ellipsize(ctx, msg, W - 120, 13), W / 2, this.textY(324, 13), 13, '#7BD389');
@@ -1136,7 +1124,6 @@ export default {
     this.footerBack(ctx, t('btn_back'), 'back', 0);
   },
 
-  /* ---------------- 关于 ---------------- */
   /* ---------------- 关于 ---------------- */
 
   drawAbout(ctx) {
@@ -1297,9 +1284,6 @@ export default {
       return;
     }
     if (a === 'editHost') { this.cycleHost(); return; }
-    if (a === 'bleScan') { this.doBleScan(); return; }
-    if (a === 'importFile') { this.doImport(); return; }
-    if (a === 'exportFile') { this.doExport(); return; }
   },
 
   /* ---------------- 业务动作 ---------------- */
@@ -1312,30 +1296,6 @@ export default {
       if (list[i].id === id) { this.detailCourse = list[i]; break; }
     }
     this.open('detail');
-  },
-
-  /* 蓝牙发现：扫描广播拿到手机端局域网地址，再走 HTTP 拉数据。
-     蓝牙自身不承载数据（Lite 只有扫描 API，无 GATT）。 */
-  doBleScan() {
-    var self = this;
-    if (!BLE.available()) { this.tip = '本机不支持蓝牙扫描'; this.redraw(); return; }
-    this.bleScanning = true;
-    this.tip = '正在扫描手机端广播…';
-    this.redraw();
-    BLE.discover(function (ok, msg, host) {
-      self.bleScanning = false;
-      if (!ok) { self.tip = msg; self.redraw(); return; }
-      if (host) {
-        store.setSyncHost(host);
-        self.tip = '已发现 ' + host + '，开始同步';
-        self.redraw();
-        self.doSync();
-        return;
-      }
-      self.tip = msg + '（使用已存地址）';
-      self.redraw();
-      if (store.get().syncHost) self.doSync();
-    });
   },
 
   doSync() {
@@ -1357,38 +1317,6 @@ export default {
     store.flagSet('nexio_sync_host', hosts[this.hostIdx]);
     this.tip = hosts[this.hostIdx] ? ('同步地址 ' + hosts[this.hostIdx]) : '已清空同步地址';
     this.redraw();
-  },
-
-  doImport() {
-    var self = this;
-    this.tip = '读取内部文件…';
-    this.redraw();
-    store.readImportFile(function (ok, text) {
-      if (!ok) {
-        store.readRawFile(function (ok2, text2) {
-          if (!ok2) { self.tip = '未找到可导入文件'; self.redraw(); return; }
-          self.applyImport(text2, '打包数据');
-        });
-        return;
-      }
-      self.applyImport(text, '内部文件');
-    });
-  },
-
-  applyImport(text, src) {
-    var self = this;
-    SY.importText(store, text, src, function (ok, msg) {
-      self.tip = ok ? ('导入成功：' + msg) : ('导入失败：' + msg);
-      self.redraw();
-    });
-  },
-
-  doExport() {
-    var self = this;
-    store.exportToFile(function (ok) {
-      self.tip = ok ? '已导出到内部文件' : '导出失败（设备不支持文件写入）';
-      self.redraw();
-    });
   },
 
   doExit() {

@@ -1,0 +1,92 @@
+NexioSchedule for Watch GT
+Copyright (C) 2026 澪洛依 (Rinrroy)
+
+This project is free software: you can redistribute it and/or modify it under
+the terms of the GNU Affero General Public License as published by the Free
+Software Foundation, either version 3 of the License, or (at your option) any
+later version.  See the LICENSE file for the full text.
+
+-------------------------------------------------------------------------------
+1. UPSTREAM WORK AND ATTRIBUTION
+-------------------------------------------------------------------------------
+
+This project is a port / derivative work of:
+
+    NexioSchedule
+    Copyright (C) Haooz (GitHub: HaoZai000)
+    https://github.com/HaoZai000/NexioSchedule
+    Licensed under the GNU Affero General Public License v3.0 (AGPL-3.0)
+
+Parts derived from the upstream project include, but are not limited to:
+
+  - the course data model and its scheduling semantics
+    (week filtering via isActiveInWeek, period / section tables)
+  - the watch synchronization protocol
+    (HTTP endpoints /ping and /schedule.json?week=N, the data_week field,
+     the BLE service UUID 0000FEE7-0000-1000-8000-00805F9B34FB, the local
+     name "NexioSchedule", and the NEXIO|<ip>:<port> advertisement payload)
+  - the application identity, including the bundle name com.haooz.chedule and
+    the original course seed data used on first launch
+
+The upstream copyright notice and license are preserved unmodified.  Nothing in
+this repository grants rights to the upstream work beyond what AGPL-3.0 grants;
+if you wish to use this project under different terms, you must obtain
+permission from the upstream author as well.
+
+-------------------------------------------------------------------------------
+2. MODIFICATIONS
+-------------------------------------------------------------------------------
+
+This repository is a re-implementation of the watch client, written from
+scratch in JavaScript for the ACE-Lite (Lite Wearable) runtime.  It does not
+contain the upstream Android (Kotlin / Jetpack Compose) source code.  The major
+modifications relative to the upstream project are:
+
+  - the entire watch client: single-page canvas rendering, internal view state
+    machine, hand-written animation, crown handling, i18n and icon packing
+  - a read-only watch UI: adding, editing and deleting courses is intentionally
+    not possible on the watch
+  - memory-bounded synchronization: only the current week is retained
+  - removal of the Wear Engine dependency
+
+As required by AGPL-3.0 section 5(a), the modified source is stated here and the
+files carry no misleading authorship claims.
+
+-------------------------------------------------------------------------------
+3. THIRD-PARTY COMPONENTS
+-------------------------------------------------------------------------------
+
+This repository ships no third-party source code and no third-party binaries.
+Components referenced at build time or referenced by design are listed here for
+attribution only:
+
+  - OpenHarmony ACE Engine (Lite)  - Apache-2.0 - OpenHarmony / OpenAtom Foundation
+    The runtime engine this application targets.  Engine behaviour (per-file
+    48 KB source limit, canvas semantics line wrapping, font handling) was
+    inspected from the public source to diagnose device issues.
+
+  - JerryScript  - Apache-2.0 - JerryScript project
+    The JavaScript engine embedded in the Lite Wearable runtime.
+
+  - DevEco Studio, Lite Wearable SDK, HUAWEI WATCH  - Huawei Technologies
+    Developer tooling and the target device family.  "HUAWEI", "WATCH GT",
+    "HarmonyOS" and "OpenHarmony" are trademarks of their respective owners and
+    are used here only to describe compatibility.
+
+  - Python and Pillow  - PSF / MIT-CMU - Python community
+    Used as offline tools to resample the application icon and to analyse
+    screen captures.  Not part of the shipped application.
+
+  - NexioSchedule upstream acknowledgements (for the phone application, not
+    bundled here): Miuix (Yukonga), Capsule (Kyant0), OkHttp (Square),
+    warehouse (XingHeYuZhuan), Shizuku (RikkaApps), Backdrop (Kyant0).
+
+-------------------------------------------------------------------------------
+4. NO WARRANTY
+-------------------------------------------------------------------------------
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.  See the GNU Affero General Public License for more details,
+and see the "免责声明 / Disclaimer" section of README.md for the non-legal
+summary that applies to this project.

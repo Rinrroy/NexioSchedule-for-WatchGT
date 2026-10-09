@@ -320,7 +320,9 @@ function readAllText(uri, cb) {
 
   function step() {
     rounds = rounds + 1;
-    if (rounds > 24) { finish(parts.length > 0, parts.join('')); return; }
+    /* 上限 16 x 4096 = 65,536 字符，与 sync.js 的 MAX_BODY 对齐：读回来的整串
+       会在内存里再复制一份给 JSON.parse，解析峰值必须留出余量（真机 512KB 档） */
+    if (rounds > 16) { finish(parts.length > 0, parts.join('')); return; }
     try {
       file.readText({
         uri: uri,

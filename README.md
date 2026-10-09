@@ -10,7 +10,7 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Lite%20Wearable%20%7C%20ACE--Lite-green.svg)](#)
 [![Runtime](https://img.shields.io/badge/runtime-JerryScript%20(ES5)-orange.svg)](#)
-[![Version](https://img.shields.io/badge/version-v1.0.1-lightgrey.svg)](#)
+[![Version](https://img.shields.io/badge/version-v1.0.2-lightgrey.svg)](#)
 [![Target](https://img.shields.io/badge/target-HUAWEI%20WATCH%20GT5%20%2F%20GT6-red.svg)](#)
 
 </div>
@@ -252,12 +252,16 @@ cd NexioWatch
 产物：
 
 ```
-entry/build/default/outputs/default/entry-default-unsigned.hap
+entry/build/default/outputs/default/entry-default-signed.hap     # 配了签名时产出，可直接装真机
+entry/build/default/outputs/default/entry-default-unsigned.hap   # 未配签名时只有这个
 ```
 
-> **签名**：本仓库未附带签名配置。装真机前请在 build-profile.json5 里补上 signingConfigs
-> （DevEco 的 File → Project Structure → Signing Configs 可自动生成），否则只能拿到 unsigned 包。
-> 构建日志里会出现 Will skip sign ... No signingConfigs profile is configured —— 这是提示，不是失败。
+> **签名**：本仓库**不附带**签名配置（build-profile.json5 里的 signingConfigs 含本机绝对路径与口令，
+> 因此不入库）。装真机前请在 build-profile.json5 里补上 signingConfigs
+> （DevEco 的 File → Project Structure → Signing Configs 可自动生成，需华为开发者账号），
+> 否则只能拿到 unsigned 包，构建日志里会出现 Will skip sign ... No signingConfigs profile is configured。
+>
+> 本项目实测过一次：配好 DevEco 自动签名后，SignHap 任务成功，产出 entry-default-signed.hap = **289,197 B**。
 
 ### 在模拟器里跑
 
@@ -315,9 +319,9 @@ hapMode: (!this.targetService.isDebug()).toString()
 
 | 构建 | app.js | pages/index/index.js | 结果 |
 | --- | --- | --- | --- |
-| debug（默认） | 69,677 B | 42,896 B | app.js **超闸 20,525 B**（结构性） |
-| -p buildMode=release | **40,702 B**（余 8,450） | **26,070 B**（余 23,082） | 两者合规 |
-| release 包内 .bc | 34,572 B | 21,854 B | 字节码路径同样合规 |
+| debug（默认） | 69,750 B | 43,927 B | app.js **超闸 20,598 B**（结构性） |
+| -p buildMode=release | **40,737 B**（余 8,415） | **26,680 B**（余 22,472） | 两者合规 |
+| release 包内 .bc | 34,600 B | 22,154 B | 字节码路径同样合规 |
 
 ### 每次打包后请跑守门脚本
 
@@ -328,8 +332,8 @@ powershell -ExecutionPolicy Bypass -File tools/check-lite-size.ps1
 输出示例：
 
 ```
-[ OK ] app.js = 40702 B, 8450 B of headroom
-[ OK ] pages\index\index.js = 26070 B, 23082 B of headroom
+[ OK ] app.js = 40737 B, 8415 B of headroom
+[ OK ] pages\index\index.js = 26680 B, 22472 B of headroom
 All .js artifacts are inside the real-device per-file hard limit.
 ```
 
@@ -392,6 +396,9 @@ NexioWatch/
 | 15 | **真机没有 globalThis**（引擎只在 JSFWK_TEST==1 的模拟器里创建）。入口写 globalThis.X = ... ⇒ 真机求值即 ReferenceError：**全黑屏但不重启**，无任何日志 | 跨文件共享只走 $app / getApp().data / @system.*；getApp() 在顶层调用一次并缓存（反复调用会触发 JS REF LIMIT） |
 | 16 | ViewModel(options) 只保留 render / data / styleSheet 与**函数**成员，其它 key 静默丢弃 | app.js 要发布的对象必须挂在 export default { data: { ... } } 上 |
 | 17 | canvas 没有 drawImage / clip，位图只能自己填矩形 | 图标量化为调色板 + 整行 RLE 点阵；要做圆形就把圆形构图烘进点阵（圆外纯黑） |
+| 18 | **ctx.font 写单个 'NNpx' 会每次都打一条引擎 WARN 并释放 fontValue_**（FontSetter 循环解析 index=0/1 两个 token，单 token 时 index=1 必然失败）。真机 HILOG 是阻塞 I/O，一次过渡能刷出上百条 | 写两个 token：ctx.font = '13px 13px'；并且**同尺寸重复赋值直接跳过**（本项目统一走 setFont(ctx, size)） |
+| 19 | **setInterval 不丢帧也不合并**：回调经 DispatchAsyncWork 排队后会被一次性排空，逐帧动画只数帧数就会越欠越多 ⇒ 连滑卡死 | 动画按**真实时间**推进（el / 总时长），并加硬上限（本项目 TRANS_MAX_MS=480 / TRANS_MAX_FRAMES=16） |
+| 20 | getContext('2d') 不是免费操作（每次 BeginPath + jerry_acquire_value） | 缓存返回的上下文对象，只在绘制抛异常时失效重建 |
 
 ---
 
@@ -417,6 +424,8 @@ NexioWatch/
 - **振动**：权限弹窗、时长、强度
 - **真机分辨率**：模拟器验证的是 454×454，真机为 466×466 圆屏
 - **长时间运行与反复进出页面**：蓝牙订阅是否真正停止、峰值内存
+- **软重启是否消失**（第六轮）：本轮修了字体日志风暴 868→0、动画定时器无上限、每帧重复开销与读文件上限，模拟器侧 48 次连滑无卡死；真机需实测打开后长时间停留 + 多次翻页
+- **已签名包能否安装**：entry-default-signed.hap（289,197 B，DevEco 自动生成的调试签名，一年有效期）在 GT5 / GT6 上的安装与启动
 
 > 以上属于「代码已实现 + 模拟器可跑，但缺硬件证据」的部分，请以真机实测为准。
 
@@ -433,6 +442,16 @@ A：先看现象 —— **黑屏但手表没软重启**，两个常见原因：
    export default { data: { NEXIO } } + 页面 getApp().data.NEXIO（见「引擎坑速查」第 15 条）。
 
 判断方法：模拟器能跑而真机黑屏 ⇒ 优先查第 1 条；真机连 onCreate 日志都没有 ⇒ 第 2 条。
+
+**Q：能打开，但显示页面后手表直接软重启？**
+A：多半是**引擎字体日志风暴**：ctx.font 用单个 'NNpx' 时，引擎每次赋字号都会同步写一条 HILOG_WARN 并释放字体串。
+真机 HILOG 是阻塞 I/O，一次 300 ms 过渡要重画 10 帧、每帧几十处文字 ⇒ 主线程被拖住触发看门狗。
+本项目已改为 setFont(ctx, size)（写 '13px 13px' + 同尺寸去重），实测日志条数 **868 → 0**。
+顺带还修了三个同类问题：动画定时器改按真实时间推进并加硬上限、缓存 canvas 上下文、单次读文件上限收到 65,536 字符。
+
+**Q：在模拟器里连续滑几次就卡死？**
+A：同上的第 2、3 条。setInterval 在 Lite 引擎里**不丢帧、不合并**，只数帧数的动画会不断积压回调。
+修完后本项目用 .dsh-tmp/stress.js 做 48 次 / 80 ms 的连滑压力测试，全程 alive=true crashed=false。
 
 **Q：所有文字看起来都一样大，挤成一团？**
 A：ctx.font 带了字体族名。本引擎只有 '<size>px'（不带族名）才服从字号，详见「引擎坑速查」第 1 条。
@@ -456,7 +475,9 @@ A：不需要。同一局域网下，手机端开 HTTP 服务，手表拉取；�
 离线时还可以走文件导入导出。
 
 **Q：构建日志报 Will skip sign？**
-A：没有配置签名，产物是 unsigned HAP。要装真机需先在 build-profile.json5 补 signingConfigs。
+A：没有配置签名，产物是 unsigned HAP，装不到真机。在 DevEco 的 File → Project Structure → Signing Configs
+里自动生成一份（需华为开发者账号）即可，之后 SignHap 任务成功会产出 entry-default-signed.hap。
+本仓库不附带签名配置，因为它含本机绝对路径与口令。
 
 **Q：模拟器能跑，真机一定行吗？**
 A：不一定。模拟器不复现 48 KB 硬闸，也不执行振动、蓝牙、@system.file 与真机表冠。
@@ -474,7 +495,9 @@ A：不一定。模拟器不复现 48 KB 硬闸，也不执行振动、蓝牙、
 - [x] 真机黑屏根因修复（去 globalThis，改 $app.data 通道）
 - [x] 圆形应用图标（桌面 PNG + 关于页点阵）
 - [x] 删除设置页与作息页、去掉种子数据（全部依赖手机端同步）
-- [ ] **真机签名包实测**（安装、渲染、字体、内存、getApp 通道）
+- [x] 运行期优化：字体日志风暴、动画定时器硬上限、帧内开销、读文件上限
+- [x] 打通签名链路（首次产出 entry-default-signed.hap）
+- [ ] **真机签名包实测**（安装、渲染、字体、内存、getApp 通道、软重启是否消失）
 - [ ] 表冠方向与灵敏度标定
 - [ ] 真机蓝牙、HTTP、振动、@system.file 联调
 - [ ] 64 KB 档机型（GT2 等）回归

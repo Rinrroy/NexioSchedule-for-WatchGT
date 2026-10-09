@@ -193,7 +193,10 @@ function drawIcon(ctx, icon, x, y) {
   if (!icon) return;
   x = Math.round(x + OX);
   y = Math.round(y + OY);
-  var rows = icon.enc.split('~');
+  /* 点阵按行拆分后缓存在 icon 上：同一图标每帧都会被重画，split 会产生一批
+     短命字符串对象（关于页过渡期每帧两次 drawIcon）。 */
+  var rows = icon.rowsCache;
+  if (!rows) { rows = icon.enc.split('~'); icon.rowsCache = rows; }
   var pal = icon.pal;
   var r;
   for (r = 0; r < icon.n && r < rows.length; r++) {

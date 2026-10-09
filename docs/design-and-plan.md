@@ -543,7 +543,7 @@ if (!store.dataIsCurrentWeek()) {
 | 1 | **真机验证 BLE 扫描**：GT5/GT6 上 `startBLEScan`/`subscribeBLEFound` 能否拿到手机端广播，`data` 是明文还是十六进制 | 是（`@system.bluetooth` 在模拟器为 undefined） | 决定第一段是否可用 |
 | 2 | **真机验证 HTTP 拉取**：`GET http://<host>:8787/schedule.json` 是否通。`ohos.permission.INTERNET` **已声明**（`config.json`，system_grant/normal，SDK 声明表 PermissionDefinitions.json:1738） | 是 | `.d.ts` 无 `@permission` 标注，故属防御性声明 |
 | 3 | **真机验证 `@system.file` / `@system.storage`**：rawfile / import 读取与内部写入、四个小标志读写 | 是 | 模拟器不执行该模块，技能明确 |
-| 4 | **GT2 兼容回退**：`MAX_COURSES` 由 12 降到 **5** 并在 64 KB 机型验证 | 否（资料支持/未知） | 改一个常量即可（`const.js:12-15` 注释原文「64KB 档可改 5」；旧文档写的「降到 8」已过时） |
+| 4 | **GT2 兼容回退**：`MAX_COURSES` 由 16 降到 **8** 并在 64 KB 机型验证 | 否（资料支持/未知） | 改一个常量即可（`common/const.js:19` 注释原文「64KB 档（GT2 等）请改 8」） |
 | 5 | **手机端 WatchSyncServer 联调**：BLE 广播与 HTTP 同机联调，确认 `NEXIO|ip:port` 解析与 `/ping` 探活 | 否 | 服务端已实现，缺端到端联调 |
 | 6 | rawfile 内置种子：把 `nexio_schedule.json` 放进 `resources/rawfile/`（**当前目录为空**） | 否 | 届时需真机确认读取 |
 | 7 | 真机验证振动（权限弹窗、时长、强度）与 466×466 圆屏字号/安全区 | 否 | 模拟器只验证 454×454 |
@@ -552,6 +552,8 @@ if (!store.dataIsCurrentWeek()) {
 | 10 | **首页在 64 KB 档的峰值**：本轮 ack 为 512 KB 档配置，GT2 的 64 KB 档未测 | 否 | 与 #4 一起做 |
 | 11 | **改周次后的联动重拉真机验证**：`doStep` 的 `weekChanged → doSync()`（`index.js:1169`）在真机走通需 HTTP 可用，模拟器只验证到「缓存标记变为过期 + 首页提示」这一半 | 是（依赖 #2） | 依赖真机 HTTP；`pngwk1`、`pngwk4` 为模拟器半程证据 |
 | 12 | **真机安装必须使用 release 构建**（第三轮新增阻断项）：真机对**每个 `.js` 文件**限长 49,152 B 且硬拒绝；debug 构建永不压缩（hvigor 用 `targetService.isDebug()` 决定 `hapMode`），debug 的 `app.js` = 72,094 B 必然超闸 ⇒ 只能装 `-p buildMode=release` 的包（本轮实测 release `app.js` 42,400 B / `pages/index/index.js` 29,057 B），装 debug 包会整屏黑 | 是（真机硬闸） | 守门脚本 `NexioWatch/tools/check-lite-size.ps1`；详见 review.md「第三轮」 |
+| 13 | **真机复测软重启是否消失**（第六轮新增阻断项）：本轮修的是四个「主线程被长时间占用 + 堆峰值」缺陷（字体日志风暴 868→0、动画定时器改按真实时间 + 硬上限、每帧开销、读文件上限 65,536 字符），模拟器侧 48 次连滑无卡死；真机需实测打开应用后是否还软重启，并用 `hdc` 抓 hilog 确认无 `ERR_OUT_OF_MEMORY` / `JS HEAP OOM` | 是（真机） | 详见 review.md「第六轮」与本文 §13 |
+| 14 | **已签名包安装验证**（第六轮新增）：`entry-default-signed.hap`（289,197 B，DevEco 生成的调试签名 profile，bundle `com.haooz.chedule`，有效期至 2027-10-09）能否在 GT5/GT6 正常安装与启动 | 是（真机 + 账号） | `build-profile.json5` 含本机绝对路径与口令，**不入库** |
 
 ## 8. 验证计划
 
@@ -680,3 +682,43 @@ if (!store.dataIsCurrentWeek()) {
 | 18 | 真机签名包：`build-profile.json5` 配 `signingConfigs`（DevEco 自动签名需华为开发者账号） | 是（账号） | 与 §7 第 12 条同源 |
 
 - **M13 第五轮：真机黑屏根因（globalThis 缺失）定位与修复 + 圆形图标 + 显示名 Nexio + 删设置/作息页 + 去种子全走手机同步 + debug/release 双构建与抓帧回归 —— 完成（模拟器侧；真机判据见 §12.4）**
+
+## 13. 第六轮（2026-10-09）：真机软重启与仿真器连滑卡死（m09147）
+
+用户反馈（逐字）：「这次可以打开了，但是显示页面后直接软重启，在仿真器里连续滑动多次页面也会卡死，看看如何优化」。第五轮修掉了「打开即黑屏」，本轮处理的是**打开之后**的运行期问题。
+
+### 13.1 反馈与处置
+
+| # | 反馈 | 根因 | 处置 |
+| --- | --- | --- | --- |
+| ① | 真机显示页面后**直接软重启** | 单一主因是**引擎字体日志风暴**：`canvas_component.cpp` FontSetter :536-562 会解析 index=0/1 两个 font token，本项目全用单 token 的 `'13px'`，index=1 处 GetSubFont 必然返回 nullptr ⇒ 每次赋字号都写一条 `HILOG_WARN "get text font size or font family failed"` 并 `ace_free(fontValue_)`。真机 HILOG 是阻塞式 I/O，一次过渡要重画 10 帧、每帧几十处文字 ⇒ 短时间数百条同步日志 + 频繁 malloc/free，主线程被拖住触发看门狗 | `setFont(ctx, size)`：写 **`'13px 13px'`（两个数字 token）** 让 index=0/1 都能解析，并做同尺寸去重；全页 22 处 `ctx.font =` 收敛到这一个入口 |
+| ② | 仿真器**连续滑动多次卡死** | 动画定时器**按帧计数**（`p = animI / TRANS_FRAMES`），30 ms 周期在单帧成本 > 30 ms 时不会丢帧；引擎侧 `timer_module.cpp:186 DispatchAsyncWork` + `async_task_manager.cpp Callback()` 会把积压回调**一次性排空** ⇒ 每多滑一次就多欠一批帧 | 过渡与补间都改为**按真实时间推进**（`t0 = new Date().getTime()`，`p = el / TRANS_MS_TOTAL`），并加硬上限 **TRANS_MAX_MS=480 / TRANS_MAX_FRAMES=16**（TWEEN 同理）——无论掉多少帧，最多 16 帧内必定收尾 |
+| ③ | （同②）每帧重复开销 | 每帧一次 `getContext('2d')`（引擎每次 `BeginPath` + `jerry_acquire_value`）；过渡期每帧两次完整 `drawView`；`reg()` 每帧推几十个命中对象；`drawIcon` 每帧 `enc.split('~')` 造新数组 | ctx 缓存到 `this.ctx`（绘制异常时置空重取）；`reg()` 在 `animOn` 时直接 return（过渡中的点击本就被 `onTap` 丢弃）；图标行数组缓存到 `icon.rowsCache` |
+| ④ | （同①，堆峰值）单次读文件上限偏大 | `readAllText` 原为 24 轮 × 4096 = **98,304 字符**，读满后 `parts.join('')` 再整串 `JSON.parse`，峰值是数据的两份 | 收紧到 **16 轮 × 4096 = 65,536**，与 `sync.js` 的 `MAX_BODY` 对齐，给解析峰值留余量 |
+
+### 13.2 引擎约束（本轮新增）
+
+- `ctx.font` 的**单 token `'NNpx'` 会稳定触发一条 WARN 并释放 `fontValue_`**；写两个数字 token（`'13px 13px'`）即可让 GetSubFont(0)/(1) 都成功。带字体族名的写法本来就是禁的（§11.2：字号会被整串忽略）。
+- `setInterval` 在 Lite 引擎里**不丢帧、不合并**：回调会经 `DispatchAsyncWork` 排队并由 `AsyncTaskManager::Callback()` 全部排空。任何逐帧动画都必须有**按真实时间的硬上限**，不能只数帧。
+- `getContext('2d')` **不是免费操作**（每次 `BeginPath` + `jerry_acquire_value(dom_)`），应缓存返回的上下文对象，只在绘制抛异常时失效重建。
+
+### 13.3 尺寸、守门与签名（本轮三次构建）
+
+| 构建 | `app.js` | `pages/index/index.js` | 49,152 B 闸 |
+| --- | --- | --- | --- |
+| debug | 69,750 B | 43,927 B | app.js 超闸 -20,598（结构性）；页面 +5,225 |
+| `-p buildMode=release`（优化后） | **40,737 B** | **26,680 B** | +8,415 / +22,472；`app.bc` 34,600 / `index.bc` 22,154 亦合规 |
+
+- `tools/check-lite-size.ps1`：release **exit 0** / debug exit 1。
+- **首次产出已签名包**：用户在 DevEco 生成调试签名（`C:/Users/LingLuoYi/.ohos/config/` 下 `.cer/.csr/.p12/.p7b`；profile `type: debug`、bundle `com.haooz.chedule`、有效期 2026-10-09 → 2027-10-09），`SignHap` 成功 ⇒ `entry-default-signed.hap` = **289,197 B**（unsigned 269,126 B）。
+- `build-profile.json5` 含本机绝对路径与加密口令，**不纳入版本库**。
+- 版本升至 **v1.0.2**（`common/const.js:13` 单一来源）；已核对签名包内 `assets/js/MainAbility/app.js` 含 `v1.0.2`、不含 `v1.0.1`。
+
+### 13.4 待办增量（接 §7 与 §12.4）
+
+| # | 事项 | 阻断项 | 备注 |
+| --- | --- | --- | --- |
+| 19 | **真机复测软重启是否消失**：打开应用后长时间停留 + 多次翻页，用 `hdc` 抓 hilog 确认无 `ERR_OUT_OF_MEMORY` / `JS HEAP OOM`，且 `get text font size or font family failed` 为 0 | 是（真机） | 本轮只在模拟器侧证明主线程占用与日志风暴已消除 |
+| 20 | **已签名包装机验证**：`entry-default-signed.hap` 在 GT5/GT6 上的安装与启动 | 是（真机） | profile 为 debug 类型、一年有效期，正式发布需在 AGC 申请发布证书 |
+
+- **M14 第六轮：字体日志风暴 + 动画定时器无上限 + 每帧重复开销 + 读文件上限 四处优化，字体 WARN 868 → 0、48 次连滑压力测试无卡死、release 签名包产出（289,197 B）、版本升 v1.0.2 —— 完成（模拟器侧；真机判据见 §13.4）**

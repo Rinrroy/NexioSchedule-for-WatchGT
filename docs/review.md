@@ -561,3 +561,51 @@
 - 静态：`drawTimes|drawSettings|doStep|loadSeed|'times'|'settings'|'reset'` 全项目 0 命中；`node --check`（页面、`common/ui.js`、`common/i18n.js`、`app.js`）通过；`btn_sync` 4 处命中。
 - 独立性：docs-writer 与 verifier teammate 本轮仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）；真机项未验证（见 `design-and-plan.md` §12.4）。
 
+---
+
+## 第六轮（2026-10-09）：真机软重启与仿真器连滑卡死（m09147）
+
+### ① 反馈
+
+> 「这次可以打开了，但是显示页面后直接软重启，在仿真器里连续滑动多次页面也会卡死，看看如何优化」
+
+上一轮修掉了黑屏（globalThis），本轮暴露的是**运行期**问题：页面能画出来，随后系统软重启；模拟器侧的表现是连续手势后卡死。两者都由「主线程被长时间占用 + 堆峰值」解释，落点是四个具体缺陷。
+
+### ② 根因与处置
+
+| # | 缺陷 | 证据（引擎源码 / 实测） | 处置 |
+| --- | --- | --- | --- |
+| 1 | **引擎字体日志风暴** | `canvas_component.cpp` FontSetter :536-562 循环解析 index=0/1 两个 token；单 token 的 `'13px'` 在 index=1 时 GetSubFont 返回 nullptr ⇒ `HILOG_WARN "get text font size or font family failed"` + `ace_free(fontValue_); fontValue_=nullptr` | `setFont(ctx, size)` 写 **`'13px 13px'`（两个数字 token）** 并做同尺寸去重；全页 22 处 `ctx.font =` 改为调用点 |
+| 2 | **动画定时器按帧计数、无上限** | 原 `p = animI / TRANS_FRAMES` 只数帧数；30 ms 定时器在单帧成本 > 30 ms 时不会丢帧，引擎 C++ 侧 `timer_module.cpp:186 DispatchAsyncWork` + `async_task_manager.cpp Callback()` 会把积压回调**一次性排空** ⇒ 主线程持续被占 | 改为按真实时间推进（`t0 = new Date().getTime()`，`p = el / TRANS_MS_TOTAL`）并加硬上限 **TRANS_MAX_MS=480 / TRANS_MAX_FRAMES=16**（补间同理 TWEEN_*）；过渡与补间仍互斥 |
+| 3 | **每帧重复开销** | 每帧一次 `getContext('2d')`（`canvas_component.cpp:325-328` 每次 BeginPath + `jerry_acquire_value`）；过渡期每帧两次完整 drawView；`reg()` 每帧推几十个命中对象；`drawIcon` 每帧 `enc.split('~')` | 缓存 ctx（绘制异常时置空重取）；`reg()` 在 `animOn` 时直接 return（过渡中的点击本来就被 onTap 丢弃）；图标行数组缓存到 `icon.rowsCache` |
+| 4 | **单次读文件上限偏大** | `readAllText` 原为 24 轮 × 4096 = 98,304 字符，读满后 `parts.join('')` 再整串 JSON.parse，峰值双份 | 收紧到 **16 轮 × 4096 = 65,536**，与 `sync.js MAX_BODY` 对齐，给解析峰值留余量 |
+
+字号那一条同时解释了「真机为什么比模拟器更早出问题」：真机 HILOG 是阻塞式 I/O，一次滑动会刷出上百条 WARN。
+
+### ③ 优化后实测
+
+| 指标 | 改前 | 改后 |
+| --- | --- | --- |
+| `get text font size or font family failed` 条数（单次会话 `sim-q5.log`） | **868** | **0**（`sim-v8f2.log` / `sim-v8soak.log`） |
+| 连滑压力（`.dsh-tmp/stress.js`，48 次 / 80 ms） | 历史上「连滑多次卡死」 | swipe#6…48、after-48、tail **全部 alive=true crashed=false** |
+| 引擎 OOM / Crash 关键字 | 有 | `JS HEAP OOM | ERR_OUT_OF_MEMORY | Engine Crash | JS REF LIMIT` **全 0** |
+
+### ④ 尺寸、守门与签名
+
+| 构建 | `app.js` | `pages/index/index.js` | 49,152 B 闸 |
+| --- | --- | --- | --- |
+| debug | 69,750 B | 43,927 B | app.js 超闸（结构性，debug 不压缩且含全部 common）；页面合规 |
+| `-p buildMode=release` | **40,737 B** | **26,680 B** | 两者合规（+8,415 / +22,472）；`.bc` 34,600 / 22,154 亦合规 |
+
+- `tools/check-lite-size.ps1`：release **exit 0**、debug exit 1。
+- **本轮首次产出已签名包**：用户在 DevEco 生成调试签名（`C:/Users/LingLuoYi/.ohos/config/` 下 `.cer/.p12/.p7b`，profile 为 `type: debug`、bundle `com.haooz.chedule`、有效期 2026-10-09 → 2027-10-09），`SignHap` 任务成功，产出 `entry-default-signed.hap` = **289,197 B**（unsigned 269,126 B）。
+- `build-profile.json5` 含本机绝对路径与加密口令，**不纳入提交**（工作区保留，便于继续出签名包）。
+
+### ⑤ 证据
+
+- 抓帧（优化后，空态数据）：`.dsh-tmp/shots-v8f2/f0.png`（首页）、`shots-v8d/f14.png`（今日）、`shots-v8w/f13.png`（周课表）、`shots-v8a/f14.png`（关于页）、`shots-v8s/f26.png`（同步页）。
+- **压缩产物冒烟**：release bundle 下 24 次连滑 + 首页帧 + 左滑关于页帧全部正常（`.dsh-tmp/shots-vsig2/f1.png`、`shots-vsig3/f13.png`）。
+- 静态：`ctx.font` 全项目仅剩 `setFont` 内部 1 处（`index.js:524`），`setFont(` 调用 22 处；`node --check`（page / ui / store）通过。
+- 版本：`common/const.js` 单一来源升到 **v1.0.2**，已核对 release 包内 `app.js` 含 `v1.0.2` 且不含 `v1.0.1`。
+- 独立性：docs-writer 与 verifier teammate 本轮仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。**真机结论待验证**：软重启是否消失需在真机复测（本轮只在模拟器侧证明主线程占用与日志风暴已消除）。
+

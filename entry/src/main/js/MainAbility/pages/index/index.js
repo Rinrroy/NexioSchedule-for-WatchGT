@@ -163,6 +163,17 @@ var TRANS_MS = 30;
 /* 数值补间（环长 / 进度条 / 指示点）：与官方 300ms 档同源 */
 var TWEEN_FRAMES = 10;
 var TWEEN_MS = 30;
+/* 动画时间预算（真机看门狗兜底，m09147）：定时器每帧的真实成本可能远大于 30ms，
+   而本引擎的定时器是 C++ 侧串行派发（timer_module.cpp Task -> DispatchAsyncWork），
+   积压回调会被一次性排空（async_task_manager.cpp Callback）。若只按帧数推进，
+   慢机器上会把 300ms 拖成几十帧、几十次整屏重绘 —— 模拟器上表现为连续滑动卡死，
+   真机上表现为看门狗软重启。因此改为按真实时间推进，并设硬上限必然收尾。 */
+var TRANS_MS_TOTAL = TRANS_FRAMES * TRANS_MS;
+var TRANS_MAX_MS = TRANS_MS_TOTAL + 180;
+var TRANS_MAX_FRAMES = 16;
+var TWEEN_MS_TOTAL = TWEEN_FRAMES * TWEEN_MS;
+var TWEEN_MAX_MS = TWEEN_MS_TOTAL + 180;
+var TWEEN_MAX_FRAMES = 16;
 
 export default {
   /* 注意：本引擎里 this.data 是 undefined，HML 的 {{x}} 直接读页面对象自身的属性。
@@ -211,6 +222,12 @@ export default {
     this.animFrom = '';
     this.animI = 0;
     this.animTimer = null;
+    /* canvas 上下文与字号都做缓存：getContext 每次都 BeginPath + acquire
+       （canvas_component.cpp GetContext :325-328），字号是原生字符串属性，且单
+       token 的 'NNpx' 一定会让引擎打一条 WARN（FontSetter :536-562）。两者原本
+       每帧都发生 ⇒ 真机上是阻塞式日志 I/O（历史日志累计上万条）。 */
+    this.ctx = null;
+    this.fontKey = '';
     /* 过渡期间由 animateTo 指定“哪一页在绘制”，用于过滤另一页发起的补间请求 */
     this.drawViewName = 'home';
   },
@@ -236,12 +253,17 @@ export default {
     this.stopTick();
     this.stopAnim();
     this.stopTween();
+    /* 丢掉缓存的画布上下文与字号：再次 onShow 时由 redraw 重新取一次 */
+    this.ctx = null;
+    this.fontKey = '';
   },
   onDestroy() {
     this.stopTick();
     this.stopAnim();
     this.stopTween();
     this.stopCrown();
+    this.ctx = null;
+    this.fontKey = '';
     /* 必须清理蓝牙订阅/定时器，否则离开页面后仍在扫描 */
     try { BLE.stop(); } catch (e) { /* ignore */ }
   },
@@ -382,10 +404,14 @@ export default {
   redraw() {
     var refs = this.$refs;
     if (!refs || !refs.cv) return;
-    var ctx = null;
-    try { ctx = refs.cv.getContext('2d'); } catch (e) { return; }
-    if (!ctx) return;
-    this.ctx = ctx;
+    /* 上下文只在首次（或失效后）取一次：过渡期每帧都要重画，而每次 getContext
+       引擎都会 BeginPath + acquire（canvas_component.cpp:325-328）。 */
+    if (!this.ctx) {
+      try { this.ctx = refs.cv.getContext('2d'); } catch (e) { return; }
+      if (!this.ctx) return;
+      this.fontKey = '';
+    }
+    var ctx = this.ctx;
     this.taps = [];
     ctx.fillStyle = C_BG;
     ctx.fillRect(0, 0, W, H);
@@ -407,6 +433,9 @@ export default {
         this.drawView(ctx, this.view);
       }
     } catch (err) {
+      /* 绘制异常多半是上下文失效：丢掉缓存，下一帧重新取一次再画错误页 */
+      this.ctx = null;
+      this.fontKey = '';
       this.drawError(ctx, err);
     }
   },
@@ -425,10 +454,10 @@ export default {
     var msg = '';
     try { msg = err && err.message ? String(err.message) : String(err); } catch (e2) { msg = '未知错误'; }
     ctx.fillStyle = C_ERR;
-    ctx.font = '17px';
+    this.setFont(ctx, 17);
     UI.ctext(ctx, '页面渲染失败', W / 2, this.textY(180, 17), 17);
     ctx.fillStyle = C_DIM;
-    ctx.font = '12px';
+    this.setFont(ctx, 12);
     UI.ctext(ctx, UI.ellipsize(ctx, this.view + ': ' + msg, W - 80, 12), W / 2, this.textY(212, 12), 12);
     this.chip(ctx, t('btn_back'), W / 2 - 60, H - 110, 120, 40, true);
     this.reg(W / 2 - 60, H - 110, 120, 40, 'jump', 'home');
@@ -448,6 +477,9 @@ export default {
 
   /* 命中区要跟着过渡偏移一起移动，否则动画期间点击会落到错误的位置 */
   reg(x, y, w, h, act, arg) {
+    /* 过渡期每帧要重画两页、各推一遍命中区（每帧几十个对象）。过渡中的点击本来
+       就被 onTap 丢弃，这里干脆不登记，避免每帧产生一批短命对象。 */
+    if (this.animOn) return;
     this.taps.push({ x: x + UI.offsetX(), y: y + UI.offsetY(), w: w, h: h, act: act, arg: arg });
   },
 
@@ -455,7 +487,7 @@ export default {
     ctx.fillStyle = on ? C_ACCENT : C_CHIP;
     UI.roundRect(ctx, x, y, w, h, h / 2);
     ctx.fillStyle = C_TEXT;
-    ctx.font = '13px';
+    this.setFont(ctx, 13);
     UI.ctext(ctx, label, x + w / 2, this.textY(y + h / 2, 13), 13);
   },
 
@@ -471,7 +503,7 @@ export default {
     ctx.fillStyle = o.fill ? o.fill : C_SURFACE;
     UI.roundRect(ctx, x, y, w, h, rad);
     ctx.fillStyle = o.labelColor ? o.labelColor : C_TEXT2;
-    ctx.font = '14px';
+    this.setFont(ctx, 14);
     UI.ltext(ctx, label, x + ROW_PAD, this.baseY(y, h, 14));
     if (value !== undefined && value !== null && value !== '') {
       var vs = o.valueSize ? o.valueSize : 13;
@@ -480,11 +512,23 @@ export default {
     }
   },
 
+  /* 字号设置：用两个数字 token（'13px 13px'）让引擎的 GetSubFont(0)/(1) 都拿到可
+     解析的字号 —— 单 token 的 'NNpx' 在 index=1 时必然解析失败，引擎会释放
+     fontValue_ 并打一条 'get text font size or font family failed'
+     （canvas_component.cpp FontSetter :536-562，真机上属阻塞式日志 I/O）。
+     同尺寸重复赋值直接跳过：字号是原生字符串属性，每次赋值都要 malloc/ace_free。 */
+  setFont(ctx, size) {
+    var key = size + 'px ' + size + 'px';
+    if (this.fontKey === key) return;
+    this.fontKey = key;
+    ctx.font = key;
+  },
+
   /* 右对齐文本：交给引擎的 textAlign='right'（canvas_component.cpp:1274 DrawLabel
      用真实字形度量对齐，实测右端恒为 x-4）——比 right-tw() 估算精确，且不会越界。 */
   rtext(ctx, text, right, y, size, color) {
     ctx.fillStyle = color ? color : C_DIM;
-    ctx.font = size + 'px';
+    this.setFont(ctx, size);
     ctx.textAlign = 'right';
     ctx.fillText(String(text === undefined || text === null ? '' : text), Math.round(right) + UI.offsetX(), y + UI.offsetY());
     ctx.textAlign = 'left';
@@ -493,7 +537,7 @@ export default {
   /* 居中文本（y 需要是 textY 的结果，避免调用方忘记换算） */
   ctext(ctx, text, cx, y, size, color) {
     ctx.fillStyle = color ? color : C_TEXT;
-    ctx.font = size + 'px';
+    this.setFont(ctx, size);
     UI.ctext(ctx, text, cx, y, size);
   },
 
@@ -590,10 +634,14 @@ export default {
     var self = this;
     if (this.tweenTimer) return;
     this.tweenI = 0;
+    var t0 = new Date().getTime();
     this.tweenTimer = setInterval(function () {
       self.tweenI = self.tweenI + 1;
-      var p = self.tweenI / TWEEN_FRAMES;
+      /* 按真实时间推进 + 硬上限：慢机器上不会把 300ms 拖成几十帧 */
+      var el = new Date().getTime() - t0;
+      var p = el / TWEEN_MS_TOTAL;
       if (p > 1) p = 1;
+      if (el >= TWEEN_MAX_MS || self.tweenI >= TWEEN_MAX_FRAMES) p = 1;
       var e = UI.ease(p);
       self.ringA = self.fRing + (self.tRing - self.fRing) * e;
       self.doneA = self.fDone + (self.tDone - self.fDone) * e;
@@ -638,11 +686,16 @@ export default {
     this.animI = 0;
     this.animP = 0;
     if (this.animTimer) { clearInterval(this.animTimer); this.animTimer = null; }
+    var t0 = new Date().getTime();
     this.redraw();
     this.animTimer = setInterval(function () {
       self.animI = self.animI + 1;
-      var p = self.animI / TRANS_FRAMES;
+      /* 按真实时间推进 + 硬上限：定时器积压时 10 帧会被排成几十帧，每帧两次
+         整屏绘制，真机看门狗会判定卡死并软重启（m09147） */
+      var el = new Date().getTime() - t0;
+      var p = el / TRANS_MS_TOTAL;
       if (p > 1) p = 1;
+      if (el >= TRANS_MAX_MS || self.animI >= TRANS_MAX_FRAMES) p = 1;
       self.animP = p;
       self.redraw();
       if (p >= 1) self.stopAnim();
@@ -675,7 +728,7 @@ export default {
        右对齐交给引擎的 textAlign='right'——旧实现用 tw() 估算宽度，含拉丁字符时会偏，
        正是 m06685 说的“时间被裁 / 不是对称关系”。 */
     ctx.fillStyle = C_TEXT;
-    ctx.font = '17px';
+    this.setFont(ctx, 17);
     UI.ltext(ctx, t('today_prefix') + WEEK_FULL[dow - 1], HOME_SAFE_X, this.textY(44, 17));
     this.rtext(ctx, this.clock(), W - HOME_SAFE_X, this.textY(44, 15), 15, C_DIM);
 
@@ -700,7 +753,7 @@ export default {
     UI.drawRing(ctx, HOME_RING_CX, HOME_RING_CY, HOME_RING_R, HOME_RING_LW, this.ringA, ringColor);
 
     ctx.fillStyle = C_TEXT;
-    ctx.font = '26px';
+    this.setFont(ctx, 26);
     var doneShown = Math.round(this.doneA);
     if (doneShown > done) doneShown = done;
     if (doneShown < 0) doneShown = 0;
@@ -801,7 +854,7 @@ export default {
 
     /* 顶部两行按圆屏安全区内缩（y<100 处圆弦只有 230 左右宽） */
     ctx.fillStyle = C_TEXT;
-    ctx.font = '19px';
+    this.setFont(ctx, 19);
     UI.ltext(ctx, t('today_prefix') + WEEK_FULL[dow - 1], 104, this.textY(46, 19));
     this.rtext(ctx, this.clock(), 350, this.textY(46, 15), 15, C_DIM);
 
@@ -834,10 +887,10 @@ export default {
     this.ctext(ctx, total > 0 ? (doneShown2 + '/' + total) : '—', RING_CX, this.textY(RING_CY, 13), 13, C_TEXT);
 
     ctx.fillStyle = C_GREEN;
-    ctx.font = '12px';
+    this.setFont(ctx, 12);
     UI.ltext(ctx, t('week_short', week) + ' · ' + this.syncLabel(), 108, this.textY(118, 12));
     ctx.fillStyle = C_TEXT2;
-    ctx.font = '13px';
+    this.setFont(ctx, 13);
     UI.ltext(ctx, total > 0 ? ('今日课程 ' + done + ' / ' + total + ' 节已完成') : t('no_class'), 108, this.textY(140, 13));
     /* 环区热区原来跳设置页；设置页已删除（m08330），改为跳同步页（数据只来自手机同步） */
     this.reg(40, 98, 254, 56, 'open', 'sync');
@@ -906,7 +959,7 @@ export default {
 
     var name = UI.ellipsize(ctx, c.name, CARD_W - 40 - UI.tw(range, 15), 19);
     ctx.fillStyle = C_TEXT;
-    ctx.font = '19px';
+    this.setFont(ctx, 19);
     UI.ltext(ctx, name, left, this.textY(cy + c1, 19));
     this.rtext(ctx, range, right, this.textY(cy + c1, 15), 15, C_TEXT2);
 
@@ -918,12 +971,12 @@ export default {
     ctx.fillStyle = UI.hexA(stat.color, 0.18);
     UI.roundRect(ctx, right - chipW, cy + c2 - 10, chipW, 20, 10);
     ctx.fillStyle = stat.color;
-    ctx.font = '12px';
+    this.setFont(ctx, 12);
     UI.ctext(ctx, label, right - chipW / 2, this.textY(cy + c2, 12), 12);
 
     var subMax = CARD_W - 40 - chipW - 12;
     ctx.fillStyle = C_DIM;
-    ctx.font = '13px';
+    this.setFont(ctx, 13);
     UI.ltext(ctx, UI.ellipsize(ctx, sub, subMax, 13), left, this.textY(cy + c2, 13));
     /* 进行中的课多一条“已上多久”的进度条，复用圆环那套补间数值 */
     if (stat.key === 'ongoing') {
@@ -936,7 +989,7 @@ export default {
 
     if (hint) {
       ctx.fillStyle = stat.key === 'ongoing' ? C_AMBER : C_BLUE;
-      ctx.font = '14px';
+      this.setFont(ctx, 14);
       UI.ltext(ctx, hint, left, this.textY(cy + c3, 14));
     }
     this.reg(CARD_X, cy, CARD_W, h, 'openCourse', c.id);
@@ -948,7 +1001,7 @@ export default {
     var st = store.get();
     var week = this.currentWeek();
     ctx.fillStyle = C_TEXT;
-    ctx.font = '21px';
+    this.setFont(ctx, 21);
     UI.ltext(ctx, t('week_label'), WEEK_SAFE_X, this.textY(54, 21));
     this.rtext(ctx, t('week_short', week), W - WEEK_SAFE_X, this.textY(54, 15), 15, '#C8C8CE');
 
@@ -973,7 +1026,7 @@ export default {
       }
       var cy = y + rowH / 2;
       ctx.fillStyle = isToday ? C_TEXT : (i > 5 ? '#8A8A90' : C_TEXT2);
-      ctx.font = '15px';
+      this.setFont(ctx, 15);
       UI.ltext(ctx, WEEK_LONG[i - 1], WEEK_TEXT_X, this.textY(cy, 15));
       var text = '';
       var color = C_DIM2;
@@ -993,7 +1046,7 @@ export default {
         color = C_TEXT;
       }
       ctx.fillStyle = color;
-      ctx.font = '13px';
+      this.setFont(ctx, 13);
       UI.ltext(ctx, UI.ellipsize(ctx, text, WEEK_NAME_W, 13), WEEK_NAME_X, this.textY(cy, 13));
       if (iso) {
         this.rtext(ctx, D.fmtShort(iso), WEEK_DATE_R, this.textY(cy, 13), 13, isToday ? C_GREEN : C_DIM2);
@@ -1037,11 +1090,11 @@ export default {
       ctx.fillStyle = C_SURFACE;
       UI.roundRect(ctx, ROW_X, y, ROW_W, 34, 9);
       ctx.fillStyle = '#75757C';
-      ctx.font = '13px';
+      this.setFont(ctx, 13);
       UI.ltext(ctx, rows[i][0], ROW_X + ROW_PAD, this.baseY(y, 34, 13));
       var shown = UI.ellipsize(ctx, rows[i][1], ROW_W - 104, 14);
       ctx.fillStyle = C_TEXT2;
-      ctx.font = '14px';
+      this.setFont(ctx, 14);
       UI.ltext(ctx, shown, ROW_X + 88, this.baseY(y, 34, 14));
     }
     if (this.tip) {
@@ -1104,7 +1157,7 @@ export default {
     for (i = 0; i < rows.length; i++) {
       var cy = 176 + i * 30;
       ctx.fillStyle = '#75757C';
-      ctx.font = '12px';
+      this.setFont(ctx, 12);
       UI.ltext(ctx, rows[i][0], ROW_X + ROW_PAD, this.textY(cy, 12));
       var shown = UI.ellipsize(ctx, rows[i][1], ROW_W - ROW_PAD * 2 - UI.tw(rows[i][0], 12) - 12, 12);
       this.rtext(ctx, shown, ROW_X + ROW_W - ROW_PAD, this.textY(cy, 12), 12, C_TEXT2);
@@ -1114,7 +1167,7 @@ export default {
     ctx.fillStyle = ok ? C_GREEN : '#8A8A90';
     UI.roundRect(ctx, 86, 306, 8, 8, 4);
     ctx.fillStyle = ok ? C_GREEN : '#8A8A90';
-    ctx.font = '13px';
+    this.setFont(ctx, 13);
     UI.ltext(ctx, this.syncLabel(), 102, this.textY(310, 13));
     this.rtext(ctx, store.syncHostLabel(), W - 86, this.textY(310, 13), 13, C_TEXT2);
 

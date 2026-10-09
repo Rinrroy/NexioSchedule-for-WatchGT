@@ -1,0 +1,22 @@
+# DevEco Studio / HarmonyOS build output
+/node_modules
+/oh_modules
+/local.properties
+/.idea
+**/build
+/.hvigor
+/.cache
+.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+
+# local-only working dirs and archives (never part of the source tree)
+/.dsh-tmp
+/.preview
+/file_system
+/%SystemDrive%
+*.zip
+824528

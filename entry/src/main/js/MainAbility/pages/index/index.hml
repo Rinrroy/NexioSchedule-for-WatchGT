@@ -1,0 +1,3 @@
+<div class="page">
+  <canvas class="cv" ref="cv" @click="onTap" @touchstart="onTS" @touchmove="onTM" @touchend="onTE" @touchcancel="onTC"></canvas>
+</div>

@@ -258,6 +258,15 @@ export default {
     });
     this.startTick();
     this.autoSync();
+    console.info('NexioWatch onShow done');
+    this.hbN = 0;
+    /* 心跳（m11079 第二轮排障）：真机启动链已全部打通，接下来要定位「画出首页之后
+       到被销毁之间」到底活了多久、死在哪个定时器。心跳 2s 一次、首条在 2s 后，
+       真机日志里最后一条心跳的编号 = 存活秒数 / 2。 */
+    this.hbTimer = setInterval(function () {
+      self.hbN = self.hbN + 1;
+      console.info('NexioWatch hb ' + self.hbN);
+    }, 2000);
   },
 
   /* 引擎在 RenderPage() 完成后调用 onReady（js_page_state.js:52），此时 canvas 节点
@@ -270,6 +279,7 @@ export default {
   onHide() {
     console.info('NexioWatch page onHide');
     this.stopDraw();
+    this.stopHb();
     this.stopTick();
     this.stopAnim();
     this.stopTween();
@@ -280,6 +290,7 @@ export default {
   onDestroy() {
     console.info('NexioWatch page onDestroy');
     this.stopDraw();
+    this.stopHb();
     this.stopTick();
     this.stopAnim();
     this.stopTween();
@@ -295,11 +306,15 @@ export default {
     var self = this;
     this.timer = setInterval(function () {
       /* 首页与当日页都显示时钟与“当前课程状态”，需要定期重画 */
+      if (!self.tickLogged) { self.tickLogged = true; console.info('NexioWatch tick fire'); }
       if (self.view === 'home' || self.view === 'today') self.redraw();
     }, 30000);
   },
   stopTick() {
     if (this.timer) { clearInterval(this.timer); this.timer = null; }
+  },
+  stopHb() {
+    if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; }
   },
 
   autoSync() {
@@ -336,6 +351,7 @@ export default {
     this.crownBound = false;
   },
   onCrown(ev) {
+    if (!this.crownFireLogged) { this.crownFireLogged = true; console.info('NexioWatch crown fire'); }
     if (this.animOn) return true;  /* 过渡中忽略表冠，避免叠帧 */
     var deg = 0;
     try {
@@ -691,6 +707,7 @@ export default {
       if (p > 1) p = 1;
       if (el >= TWEEN_MAX_MS || self.tweenI >= TWEEN_MAX_FRAMES) p = 1;
       var e = UI.ease(p);
+      if (!self.tweenLogged) { self.tweenLogged = true; console.info('NexioWatch tween fire'); }
       self.ringA = self.fRing + (self.tRing - self.fRing) * e;
       self.doneA = self.fDone + (self.tDone - self.fDone) * e;
       self.barA = self.fBar + (self.tBar - self.fBar) * e;
@@ -700,6 +717,7 @@ export default {
         self.doneA = self.tDone;
         self.barA = self.tBar;
         self.stopTween();
+        if (!self.tweenDoneLogged) { self.tweenDoneLogged = true; console.info('NexioWatch tween done'); }
       }
     }, TWEEN_MS);
   },
@@ -740,6 +758,7 @@ export default {
       self.animI = self.animI + 1;
       /* 按真实时间推进 + 硬上限：定时器积压时 10 帧会被排成几十帧，每帧两次
          整屏绘制，真机看门狗会判定卡死并软重启（m09147） */
+      if (!self.animFireLogged) { self.animFireLogged = true; console.info('NexioWatch anim fire'); }
       var el = new Date().getTime() - t0;
       var p = el / TRANS_MS_TOTAL;
       if (p > 1) p = 1;
@@ -1235,6 +1254,7 @@ export default {
        子页面  -> 返回上一层视图（左滑不动作，避免误触退出）
      竖向拖拽在可滚动列表（作息）上按行滚动，与表冠共用 scrollTopRow。 */
   onTS(e) {
+    if (!this.tsLogged) { this.tsLogged = true; console.info('NexioWatch touch start'); }
     if (this.animOn) return;
     var p = UI.pointOf(e);
     this.swipeX = p ? p.x : -1;

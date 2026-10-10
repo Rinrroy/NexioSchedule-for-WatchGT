@@ -760,3 +760,65 @@
 | 有 `first draw` 之后才 `onDestroy` | 应用本身跑起来了，是系统把它拆了 ⇒ 转查系统侧（内存水位、看门狗、ability 配置），不再动 JS |
 
 - **独立性**：docs-writer 与 verifier teammate 仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。
+
+## 第九轮（2026-10-10）：真机探针日志判读 —— 启动链全部打通，崩在 onShow 之后
+
+### ① 用户提供的第二轮真机日志（同一台 HUAWEI WATCH GT 6-026，装的是带探针的包）
+
+```
+10 12:29:26  [Console Info] NexioWatch app onCreate v1.0.2
+10 12:29:26  [Console Info] NexioWatch page module ready
+10 12:29:26  [Console Info] NexioWatch page onInit
+10 12:29:26  [Console Info] NexioWatch page onReady
+10 12:29:26  [Console Info] NexioWatch first draw home
+10 12:29:26  [Console Info] NexioWatch page onShow
+10 12:29:26  [Console Info] NexioWatch crown api=yes
+10 12:29:26  [Console Info] NexioWatch store load ok=true
+10 12:29:26  [Console Info] NexioWatch autoSync host=none
+```
+
+### ② 这轮日志证明了什么
+
+| # | 推论 | 依据 |
+| --- | --- | --- |
+| 1 | **启动链全部打通**：app.js 与页面 bundle 都求值成功，首页真的画出来了 | 9 条探针全部按预期顺序出现，包含 `first draw home` 和 `page onShow` |
+| 2 | **不是 49,152 B 硬闸**（再次确认） | 有 `page module ready` 和 `first draw` ⇒ 页面 JS 完整执行了 |
+| 3 | **不是启动即死的内存问题** | 能画完第一帧、走完整个 onShow，说明 jerry 堆在启动期没有 OOM |
+| 4 | 崩溃发生在 **onShow 之后**（运行期），不是启动期 | 日志停在 `autoSync host=none`，这一行是 onShow 的最后一步；随后表就软重启了 |
+| 5 | 旧包缺一条分界探针 | 当时还没有 `onShow done` 与心跳探针，所以无法判定死在哪一个 30 ms 定时器、30 s tick、或表冠/触摸回调里 |
+
+> 上轮的分析方向是对的（不是 49,152 B 闸、不是 JS 堆 OOM），但这轮日志把范围进一步收窄到「**运行期**：画完首页之后，某个周期性回调或事件回调里」。
+
+### ③ 本轮新增探针（装的就是这份）
+
+| 探针 | 位置 | 用来回答 |
+| --- | --- | --- |
+| `NexioWatch onShow done` | onShow 末尾 | 启动链是否真的走完了 |
+| `NexioWatch hb N`（2s 一次） | setInterval 心跳 | **存活秒数 = 最后一条 N × 2**；若下一次 `app onCreate` 出现，就是真·软重启 |
+| `NexioWatch tick fire` | 30s tick 首次 | 排除/锁定 30 s 定时器 |
+| `NexioWatch tween fire` / `tween done` | 300 ms 补间首次/收尾 | 排除/锁定数值补间 |
+| `NexioWatch anim fire` | 页面过渡首次 | 排除/锁定 300 ms 过渡 |
+| `NexioWatch crown fire` | 表冠回调首次 | 排除/锁定表冠 |
+| `NexioWatch touch start` | 触摸按下首次 | 排除/锁定触摸 |
+
+### ④ 验证（本轮两次构建 + 12 秒心跳冒烟）
+
+| 构建 | `app.js` | `pages/index/index.js` | 49,152 B 闸 |
+| --- | --- | --- | --- |
+| debug | 48,308 B | 44,316 B | 合规（+844 / +4,836） |
+| `-p buildMode=release` | **28,790 B** | **27,194 B** | `app.bc` 25,260 / `index.bc` 22,446 亦合规 |
+
+- 模拟器 12 秒心跳冒烟（`.dsh-tmp/sim-hb1.log`）：启动链 9 条 + `onShow done` + `hb 1..15` + `tween fire/done` + `anim fire` + `tick fire`，**0 条 JS Error / 0 条 fatal**。
+- 已签名包 `entry-default-signed.hap` = **227,565 B**（含全部心跳/定时器探针）。
+
+### ⑤ 判读规则（下一份真机日志用它定位）
+
+| 日志形态 | 根因 |
+| --- | --- |
+| `app onCreate` 出现两次，中间隔 `hb N` | 真·软重启：应用跑了约 N×2 秒后被系统拆掉再拉起 |
+| 心跳到 `hb N` 后没有 `onCreate`，但也没有 `hb N+1` | 应用被冻结/ANR（JS 任务卡死），而不是被销毁 |
+| `hb N` 之后紧接着 `onDestroy`、中间没有 fatal 行 | 系统正常销毁（同第八轮），不是崩溃 |
+| `hb N` 之后出现 `tick fire`/`tween fire`/`anim fire` 但马上停 | 死在对应的那个 30 ms/30 s 定时器里 |
+| `hb N` 之后出现 `crown fire`/`touch start` 但马上停 | 死在表冠或触摸回调里 |
+
+- **独立性**：docs-writer 与 verifier teammate 仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。

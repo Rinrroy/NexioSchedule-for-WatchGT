@@ -56,10 +56,14 @@ export default {
   data: {
     NEXIO: NEXIO
   },
+  /* 真机排障探针（m10918）：设备侧 hilog 只保留 APP 域，引擎自己的 ACE 域日志
+     （fatal_handler 的 'hitted by fatal error'、js_page_state_machine 的
+     'Eval JS file failed'）在用户抓到的日志里看不到，console 输出是唯一可靠通道。
+     探针只打 ASCII 短串，靠「最后一条探针」定位崩溃点。 */
   onCreate() {
-    console.info('NexioWatch onCreate');
+    console.info('NexioWatch app onCreate ' + C.VERSION);
   },
   onDestroy() {
-    console.info('NexioWatch onDestroy');
+    console.info('NexioWatch app onDestroy');
   }
 };

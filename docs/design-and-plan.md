@@ -770,3 +770,50 @@ if (!store.dataIsCurrentWeek()) {
 | 22 | 已签名包装机验证（第六轮遗留，包体因删通道变小） | 是（真机） | 需先在 DevEco 里重新出包 |
 
 - **M15 第七轮：删净 BLE/文件导入导出/文件落盘三条无用通道、权限表收敛到 INTERNET、9 个 export default 与全部死函数删除、页面减少每帧分配；debug 包首次同时满足 49,152 B 闸；启动净需堆 ≈96 KB → ≈88 KB —— 完成（模拟器侧；真机判据见 §14.4）**
+
+## 15. 第八轮（2026-10-10）：真机日志判读与探针化
+
+用户提供 HUAWEI WATCH GT 6-026 的日志（逐字）：
+
+```
+10 07:36:15 0 0 I 31/APP: [Console Info] NexioWatch onCreate
+10 07:36:16 0 0 I 31/APP: [Console Info] NexioWatch onDestroy
+```
+
+### 15.1 判读（对本项目方向的重大修正）
+
+| 结论 | 依据 |
+| --- | --- |
+| 应用求值成功，**不是 49,152 B 硬闸** | 有 `onCreate` ⇒ app.js 执行了；超闸时该文件零执行 |
+| **不是 JS 堆 OOM** | 有 `onDestroy`。`InvokeMethodWithoutParameter` 第一句 `if (IsJSRuntimeFatal()) return;`（`js_ability_impl.cpp:404-409`），而 `IsJSRuntimeFatal()` 只对 JS HEAP OOM / REF LIMIT / DISABLED BYTE CODE / ASSERTION 为 true（`fatal_handler.cpp:268-286`）⇒ 这四类会跳过 onDestroy |
+| 应用被**系统正常销毁**（或非 JS-runtime 致命） | `TransferToDestroy` 三个调用点中，`fatal_handler.cpp:135` 已被上一条排除 |
+| 本地日志通道只能看到应用自己的 `console` | 真机抓到的是 `31/APP` 域；引擎错误在 ACE 域（本次截图看不到） |
+
+> 第四~七轮按「真机 JS 堆 OOM」优化（删通道、删 export default、启动堆 −8 KB）的**方向被这条日志否掉**。后续定位必须靠页面侧日志。
+
+### 15.2 本轮改动
+
+1. **探针链**（13 条，全部 ASCII 短串）：`app onCreate` / `app onDestroy` / `page module ready` / `page onInit` / `page onReady` / `first draw <view>` / `drawError <msg>` / `page onShow|onHide|onDestroy` / `crown api=` / `store load ok=` / `autoSync host=` 与 `result` / `pull fail:`。
+2. **首绘保证**：新增 `onReady()`（引擎 `RenderPage()` 后回调，`js_page_state.js:44-59`，此时 canvas 必然就绪）+ `ensureDraw()`（100 ms × 最多 10 次重试）+ `stopDraw()`（onHide/onDestroy 成对清理）。旧 `redraw()` 在 `$refs.cv` 未就绪时直接 return 且**永不重试** ⇒ 真机可能「启动成功但一直黑屏」。
+3. **修掉探针自身引入的 bug**：`app.js` 的 onCreate 探针误用未定义的 `VERSION`（应为 `C.VERSION`），模拟器日志报 `ReferenceError: VERSION is not defined`；若直接上真机会让 app.js 求值失败、亲手制造黑屏。已修复并复测。
+
+### 15.3 尺寸与验证
+
+| 构建 | `app.js` | `pages/index/index.js` | 49,152 B 闸 |
+| --- | --- | --- | --- |
+| debug | 48,308 B | 43,231 B | 两者合规（+844 / +5,921） |
+| `-p buildMode=release` | **28,790 B** | **26,454 B** | +20,362 / +22,698；`app.bc` 25,260 / `index.bc` 21,794 |
+
+- `tools/check-lite-size.ps1` release **exit 0**。
+- 模拟器探针链完整、0 条 JS Error / 0 条 fatal（`.dsh-tmp/sim-probe3.log`）；五视图抓帧复测正常（`.dsh-tmp/frames-r8`、`frames-r9`）。
+- 96 KB 堆 + 90 s「page」手势压测：53 次手势 / 566 ack，`crashed=false`，探针各出现一次（无重复回调、无定时器泄漏）。
+- 已签名包 `entry-default-signed.hap` = **223,471 B**（debug 签名）。
+
+### 15.4 待办增量（接 §7、§13.4 与 §14.4）
+
+| # | 事项 | 阻断项 | 备注 |
+| --- | --- | --- | --- |
+| 23 | **带探针版本的真机日志**：按 13 条探针判断故障停在哪一步 | 是（真机） | 判据表见 review.md「第八轮」§⑤ |
+| 24 | 若日志显示 `first draw` 之后才被销毁 ⇒ 转查系统侧（内存水位、看门狗、ability 配置），不再改 JS | 是（真机） | — |
+
+- **M16 第八轮：真机日志判读（排除 49,152 B 闸与 JS 堆 OOM）+ 13 条探针 + onReady/ensureDraw 首绘保证 + 修复探针自身的 `VERSION` 未定义缺陷 —— 完成（代码与模拟器侧；真机判据见 §15.4）**

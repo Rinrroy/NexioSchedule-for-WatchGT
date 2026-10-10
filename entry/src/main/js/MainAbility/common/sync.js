@@ -154,6 +154,8 @@ function pull(url, opts, cb) {
   function finish(ok, err, text) {
     if (done) return;
     done = true;
+    /* 探针（m10918）：真机日志只留 APP 域，网络失败原因必须自己打出来 */
+    if (!ok) console.info('NexioWatch pull fail: ' + err);
     /* 请求先返回时必须清掉超时兜底，否则每次拉取都会白留一个定时器（长跑会累积） */
     if (guard) clearTimeout(guard);
     cb(ok, err, text);

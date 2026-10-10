@@ -82,6 +82,10 @@ var WEEK_FULL = K.WEEK_FULL;
 var WEEK_LONG = K.WEEK_LONG;
 var MAX_COURSES = K.MAX_COURSES;
 var HEAP_TIER_KB = K.HEAP_TIER_KB;
+/* 探针：页面 bundle 求值成功的唯一证据。若真机日志里连这条都没有，
+   说明页面 JS 根本没被执行（49,152 B 闸或 eval 失败），而不是运行期问题。 */
+console.info('NexioWatch page module ready');
+
 var W = 454;
 var H = 454;
 
@@ -179,6 +183,11 @@ export default {
   data: {},
 
   onInit() {
+    /* 探针：页面模块求值成功、onInit 被调用的唯一证据（见 app.js 顶部说明） */
+    console.info('NexioWatch page onInit');
+    this.drawLogged = '';
+    this.drawRetry = 0;
+    this.drawTimer = null;
     this.view = 'home';
     /* 视图栈：lite 没有页面栈，这里自己维护一份，保证任意层级都能逐级返回 */
     this.stack = [];
@@ -231,14 +240,19 @@ export default {
 
   onShow() {
     var self = this;
+    console.info('NexioWatch page onShow');
     this.aDate = D.todayISO();
     this.week = store.get().settings.currentWeek;
     this.view = 'home';
     this.exitArmed = false;
     this.stack = [];
     this.startCrown();
-    this.redraw();
-    store.load(function () {
+    /* 首次绘制：真机上 onShow 可能早于 canvas 节点就绪（$refs.cv 尚未挂上），
+       此时 redraw() 会直接返回、屏幕永远不亮。这里改成带上限的重试，
+       由 ensureDraw 负责，避免「能打开但一直黑屏」被系统当成无响应而拆掉应用。 */
+    this.ensureDraw();
+    store.load(function (ok) {
+      console.info('NexioWatch store load ok=' + ok);
       if (!self.week) self.week = store.get().settings.currentWeek;
       self.redraw();
     });
@@ -246,7 +260,16 @@ export default {
     this.autoSync();
   },
 
+  /* 引擎在 RenderPage() 完成后调用 onReady（js_page_state.js:52），此时 canvas 节点
+     一定已经建好；把它作为首绘的第二次机会。 */
+  onReady() {
+    console.info('NexioWatch page onReady');
+    this.ensureDraw();
+  },
+
   onHide() {
+    console.info('NexioWatch page onHide');
+    this.stopDraw();
     this.stopTick();
     this.stopAnim();
     this.stopTween();
@@ -255,6 +278,8 @@ export default {
     this.fontKey = '';
   },
   onDestroy() {
+    console.info('NexioWatch page onDestroy');
+    this.stopDraw();
     this.stopTick();
     this.stopAnim();
     this.stopTween();
@@ -280,9 +305,13 @@ export default {
   autoSync() {
     var self = this;
     var st = store.get();
+    console.info('NexioWatch autoSync host=' + (st.syncHost ? st.syncHost : 'none'));
     if (!st.syncHost || this.syncTried) return;
     this.syncTried = true;
-    SY.manualPull(store, function () { self.redraw(); });
+    SY.manualPull(store, function (ok, msg) {
+      console.info('NexioWatch autoSync result ok=' + ok + ' ' + (msg ? msg : ''));
+      self.redraw();
+    });
   },
 
   /* ---------------- 表冠 ----------------
@@ -291,6 +320,7 @@ export default {
      event.degree 是度数、逆时针为正；回调返回 true 表示已消费、不再向下分发。 */
   startCrown() {
     if (this.crownBound) return;
+    console.info('NexioWatch crown api=' + (typeof setMonitorForCrownEvents === 'function' ? 'yes' : 'no'));
     if (typeof setMonitorForCrownEvents !== 'function') return;
     var self = this;
     try {
@@ -396,6 +426,27 @@ export default {
 
   /* ---------------- 绘制入口 ---------------- */
 
+  /* 首绘保证：canvas 节点没就绪时按 100ms 重试，最多 10 次（1s）。
+     一次成功就不再重试；显式拿到引用后会由 redraw 自己置 drawLogged。 */
+  ensureDraw() {
+    var self = this;
+    this.redraw();
+    if (this.drawLogged) return;
+    if (this.drawRetry >= 10) {
+      console.info('NexioWatch ensureDraw gave up');
+      return;
+    }
+    this.drawRetry = this.drawRetry + 1;
+    this.drawTimer = setTimeout(function () {
+      self.drawTimer = null;
+      self.ensureDraw();
+    }, 100);
+  },
+  /* 与 ensureDraw 成对：页面隐藏/销毁时停掉首绘重试（技能要求定时器必须有清理路径） */
+  stopDraw() {
+    if (this.drawTimer) { clearTimeout(this.drawTimer); this.drawTimer = null; }
+  },
+
   redraw() {
     var refs = this.$refs;
     if (!refs || !refs.cv) return;
@@ -428,10 +479,16 @@ export default {
       } else {
         this.drawView(ctx, this.view);
       }
+      /* 首帧绘制成功即留一条探针：崩溃若发生在首帧之后，日志里就有分界点 */
+      if (!this.drawLogged) {
+        this.drawLogged = this.view;
+        console.info('NexioWatch first draw ' + this.view);
+      }
     } catch (err) {
       /* 绘制异常多半是上下文失效：丢掉缓存，下一帧重新取一次再画错误页 */
       this.ctx = null;
       this.fontKey = '';
+      console.info('NexioWatch drawError ' + (err && err.message ? err.message : err));
       this.drawError(ctx, err);
     }
   },
@@ -1305,6 +1362,7 @@ export default {
     this.tip = '同步中…';
     this.redraw();
     SY.manualPull(store, function (ok, msg) {
+      console.info('NexioWatch manual sync ok=' + ok + ' ' + (msg ? msg : ''));
       self.tip = ok ? msg : ('同步失败：' + msg);
       self.redraw();
     });

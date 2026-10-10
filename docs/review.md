@@ -685,3 +685,78 @@
 - 堆：`.dsh-tmp/heapsweep.js 64,72,80,88,96 13`，OOM 报文见 `.dsh-tmp/sim-hs80.log:33-47`。
 - **独立性**：docs-writer 与 verifier teammate 本轮仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。
 - **真机仍待验证**：软重启是否消失（判据：打开后长时间停留 + 多次翻页，`hdc` 抓 hilog 无 `ERR_OUT_OF_MEMORY` / `JS HEAP OOM`）。若仍复现，则说明真机堆比 88 KB 更紧或存在运行期增长点，下一步应改为「按需分配 + 更激进的缓存裁剪」。
+
+## 第八轮（2026-10-10）：真机日志判读 —— 软重启不是 JS 堆 OOM，改为探针定位
+
+### ① 用户提供的真机日志（HUAWEI WATCH GT 6-026）
+
+```
+10 07:36:15 0 0 I 31/APP: [Console Info] NexioWatch onCreate
+10 07:36:16 0 0 I 31/APP: [Console Info] NexioWatch onDestroy
+```
+
+### ② 这份日志能证明什么
+
+| # | 推论 | 依据 |
+| --- | --- | --- |
+| 1 | **不是 49,152 B 硬闸** | `onCreate` 打出来了 ⇒ app.js 完整求值成功（超闸时该文件零执行、连 onCreate 都不会有）。`js_app_context.cpp:95-99` |
+| 2 | **不是 jerry 的 JS 堆 OOM** | `onDestroy` 打出来了。`TransferToDestroy`→`CleanUp`→`InvokeOnDestroy`→`InvokeMethodWithoutParameter` 的第一句就是 `if (IsJSRuntimeFatal()) return;`（`js_ability_impl.cpp:404-409`），而 `IsJSRuntimeFatal()` 只对 **JS HEAP OOM / JS REF LIMIT / DISABLED BYTE CODE / ASSERTION** 四种返回 true（`fatal_handler.cpp:268-286`）。这四种会**跳过**用户回调 ⇒ 日志里出现 onDestroy，就说明致命码不在这四种里 |
+| 3 | 应用是被**系统正常销毁**的（AMS 决定的 OnStop/OnDestroy），或由非 JS-runtime 的致命触发 | 三个 `TransferToDestroy` 调用点：`slite_ace_ability.cpp:69`（系统销毁）、`ace_ability.cpp:93`（系统 OnStop）、`fatal_handler.cpp:135`（jerry fatal）。第 2 条已排除后者 |
+| 4 | **看不出页面（index.js）有没有加载** | 安装的那版代码里页面**没有任何日志**：只有 app.js 的两条 `console.info`。这正是本轮要补的 |
+| 5 | 引擎自己的错误行在捕获里看不见 | 用户抓到的是 `31/APP` 域（`console` 输出走 `FEATURE_USER_MC_LOG_PRINTF` → `HILOG_MODULE_APP`）。引擎的 `hitted by fatal error` / `Eval JS file failed` / `bigger than` 全在 **ACE 域**，不在这次截图里 |
+
+> **重要修正**：第四~七轮一直按「真机 JS 堆 OOM」方向优化（删通道、删 export default、减 8 KB 启动堆）。这条日志把该方向**否掉了**：真机故障不是 JS 堆 OOM。接下来的定位必须靠页面侧日志，而不是继续猜内存。
+
+### ③ 本轮改动（探针 + 首绘保证）
+
+**A. 探针链（只打 ASCII 短串，靠「最后一条」定位停在哪一步）**
+
+| 探针 | 位置 | 含义 |
+| --- | --- | --- |
+| `NexioWatch app onCreate v1.0.2` | `app.js` onCreate | app.js 求值成功 + 版本号 |
+| `NexioWatch app onDestroy` | `app.js` onDestroy | 应用级销毁 |
+| `NexioWatch page module ready` | `pages/index/index.js` 模块顶层 | **页面 bundle 被求值**（若真机日志没有这条 ⇒ 页面 JS 根本没执行，49,152 B 闸或 eval 失败） |
+| `NexioWatch page onInit` | 页面 onInit | 页面被引擎接管 |
+| `NexioWatch page onReady` | 页面 onReady | 引擎 `RenderPage()` 完成（`js_page_state.js:52`） |
+| `NexioWatch first draw <view>` | redraw 首次成功 | **画面真的画出来了**（崩溃若在其后，日志里有明确分界） |
+| `NexioWatch drawError <msg>` | redraw 的 catch | 绘制异常及其原因 |
+| `NexioWatch page onShow` / `onHide` / `onDestroy` | 对应生命周期 | 生命周期轨迹 |
+| `NexioWatch crown api=yes/no` | startCrown | 真机是否有表冠接口 |
+| `NexioWatch store load ok=<bool>` | store.load 回调 | 存储读取完成 |
+| `NexioWatch autoSync host=<h>/none` + `autoSync result ok=…` | autoSync | 同步地址与结果 |
+| `NexioWatch pull fail: <原因>` | `sync.js` finish() | 网络失败原因（超时/连接失败(code)/响应为空/数据过大） |
+
+**B. 首绘保证：`onReady` + 带上限重试**
+
+- 新增 `onReady()`。引擎在 `RenderPage()` 之后调用它（`js_page_state.js:44-59` 的 READY 状态），此时 canvas 节点必然已建好 —— 比 `onShow` 更可靠的首绘时机。
+- 新增 `ensureDraw()`：先 `redraw()`，若 `drawLogged` 仍为空则 100 ms 后重试，最多 10 次（1 s）；成功即停。旧代码里 `redraw()` 在 `$refs.cv` 未就绪时**直接 return 且永不重试** ⇒ 真机上若 onShow 早于节点挂载，就是「能启动、画面全黑、随后被系统拆掉」。
+- 新增 `stopDraw()`，在 `onHide`/`onDestroy` 里与 `ensureDraw` 成对清理定时器（技能要求：每个定时器必须有清理路径）。
+
+**C. 顺带修掉一个真 bug（探针自己抓到的）**
+
+`app.js` 的 onCreate 探针最初写成 `console.info('... ' + VERSION)`，而 `VERSION` 在 `app.js` 里并不存在（它只在 NEXIO 对象上，作为 `C.VERSION`）。模拟器日志当场报 `ReferenceError: VERSION is not defined` —— 若直接上真机，这条探针会让 app.js 求值失败、**亲手制造一次黑屏**。已改为 `C.VERSION`，并在模拟器复测通过。
+
+### ④ 验证（本轮两次构建 + 冒烟 + 压测）
+
+| 构建 | `app.js` | `pages/index/index.js` | 49,152 B 闸 |
+| --- | --- | --- | --- |
+| debug | 48,308 B（+844） | 43,231 B（+5,921） | 两者合规 |
+| `-p buildMode=release` | **28,790 B**（+20,362） | **26,454 B**（+22,698） | `app.bc` 25,260 / `index.bc` 21,794 亦合规 |
+
+- `tools/check-lite-size.ps1` release **exit 0**。
+- 模拟器探针链完整（`.dsh-tmp/sim-probe3.log`）：`app onCreate v1.0.2` → `page module ready` → `page onInit` → `page onReady` → `first draw home` → `page onShow` → `crown api=yes` → `store load ok=true` → `autoSync host=none`，**0 条 JS Error / 0 条 fatal**。
+- 五视图抓帧复测（`.dsh-tmp/frames-r8`、`frames-r9`）：首页 / 今日 / 周课表 / 同步 / 关于全部正常，导航胶囊与「返回」命中无误。
+- 96 KB 堆 + 90 s「page」手势压测（`.dsh-tmp/heapsoak.js probe4 96 90 page`）：53 次手势 / 566 个 ack，`survived=93009ms crashed=false sig=[]`，探针全部只出现一次（无重复回调、无定时器泄漏）。
+
+### ⑤ 结论与下一步
+
+**代码侧能做的已经做完，现在缺的是「带探针的那一版」的真机日志。** 请安装本轮产物（`entry/build/default/outputs/default/entry-default-signed.hap`，223,471 B，debug 签名）后重新打开应用，抓 `NexioWatch` 的日志：
+
+| 日志停在哪 | 根因 |
+| --- | --- |
+| 只有 `app onCreate`，没有 `page module ready` | 页面 JS 未被执行（49,152 B 闸 / eval 失败 / .bc 快照不兼容） |
+| 到 `page module ready` 但没有 `page onInit` | 引擎 EvalPage 失败（同上，且 app 侧正常） |
+| 到 `page onInit` 但没有 `first draw` | 页面渲染路径异常（看 `drawError` 那条） |
+| 有 `first draw` 之后才 `onDestroy` | 应用本身跑起来了，是系统把它拆了 ⇒ 转查系统侧（内存水位、看门狗、ability 配置），不再动 JS |
+
+- **独立性**：docs-writer 与 verifier teammate 仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。

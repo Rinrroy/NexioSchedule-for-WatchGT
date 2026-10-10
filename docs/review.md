@@ -822,3 +822,68 @@
 | `hb N` 之后出现 `crown fire`/`touch start` 但马上停 | 死在表冠或触摸回调里 |
 
 - **独立性**：docs-writer 与 verifier teammate 仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。
+
+## 第十轮（2026-10-10）：真机第三轮探针日志 —— 应用能活到 hb 1（≈2s），死在 hb 1..2 之间
+
+### ① 用户提供的第三轮真机日志（同一台 HUAWEI WATCH GT 6-026，装的是带心跳探针的包）
+
+```
+10 12:57:58  [Console Info] NexioWatch app onCreate v1.0.2
+10 12:57:58  [Console Info] NexioWatch page module ready
+10 12:57:58  [Console Info] NexioWatch page onInit
+10 12:57:58  [Console Info] NexioWatch page onReady
+10 12:57:58  [Console Info] NexioWatch first draw home
+10 12:57:58  [Console Info] NexioWatch page onShow
+10 12:57:58  [Console Info] NexioWatch crown api=yes
+10 12:57:58  [Console Info] NexioWatch store load ok=true
+10 12:57:58  [Console Info] NexioWatch autoSync host=none
+10 12:57:58  [Console Info] NexioWatch onShow done
+10 12:57:58  [Console Info] NexioWatch tween fire
+10 12:57:58  [Console Info] NexioWatch tween done
+10 12:58:00  [Console Info] NexioWatch hb 1
+```
+
+### ② 这轮日志把时间窗收窄到「tween done → hb 1 → 死」
+
+| # | 推论 | 依据 |
+| --- | --- | --- |
+| 1 | 启动链全部打通，**首页真的画出来了** | 11 条探针按预期顺序出现，含 `first draw home` / `page onShow` / `onShow done` |
+| 2 | 300 ms 数值补间**正常跑完**，没有卡在中间 | 有 `tween fire` 和 `tween done` |
+| 3 | 应用**活到了 hb 1（≈2 秒）** | `hb 1` 出现了；2 秒心跳是 onShow 返回后启动的第一个长定时器 |
+| 4 | 崩溃发生在 **hb 1 之后、hb 2 之前**（约 2–4 秒） | 日志停在 `hb 1`，没有 `hb 2`、没有 `onDestroy`、没有 `app onCreate` 复现 |
+| 5 | 30 s tick 可以排除（它还没到第一次触发） | `tick fire` 没有出现 |
+| 6 | 表冠/触摸可以排除（用户没碰） | `crown fire` / `touch start` 没有出现 |
+| 7 | 页面过渡动画可以排除（没翻页） | `anim fire` 没有出现 |
+
+⇒ 剩下的唯一嫌疑：**tween 收尾后的稳态重画**（redraw 3–5）。onShow 结束后还在跑的只有：
+- `hb` 心跳（2 s 一次，只打一条日志，JS 成本 < 0.1 ms）；
+- `tick`（30 s 一次，还没到）；
+- **tween 收尾后 `redraw()` 返回前画的那一帧，以及之后 30 s tick 到来前的空闲重画**。
+
+### ③ 本轮新增的成本探针（装的就是这份）
+
+| 探针 | 位置 | 回答 |
+| --- | --- | --- |
+| `NexioWatch hb ack N` | hb 回调内 | 一次心跳回调在真机上花多久（≈2.5 s ⇒ 看门狗；< 0.1 s ⇒ JS 很快） |
+| `NexioWatch redraw ack N` | redraw() 收尾 | 第 2/3/4 次整屏重画的耗时 |
+| `NexioWatch drawHome ack N` | drawHome() 收尾 | 首页绘制本身在第 2–6 次重画里的耗时 |
+
+### ④ 验证（本轮两次构建 + 12 秒心跳冒烟）
+
+| 构建 | `app.js` | `pages/index/index.js` | 49,152 B 闸 |
+| --- | --- | --- | --- |
+| debug | 48,308 B | 45,020 B | 合规（+844 / +4,132） |
+| `-p buildMode=release` | **28,790 B** | **27,728 B** | `app.bc` 25,260 / `index.bc` 22,788 亦合规 |
+
+- 模拟器 12 秒冒烟（`.dsh-tmp/sim-hb4.log`）：`redraw ack 0..1`、`drawHome ack 0..1`、`hb ack 0` 全部 < 2 ms，探针链完整，**0 条 JS Error / 0 条 fatal**。
+- 已签名包 `entry-default-signed.hap` = **227,566 B**（含全部成本探针）。
+
+### ⑤ 判读规则（下一份真机日志用它定案）
+
+| 日志形态 | 根因 |
+| --- | --- |
+| `hb ack` 达到几百到几千 ms | 一次心跳回调就把 JS 任务卡死 ⇒ **看门狗软重启**，转查系统侧（应用本身没做错） |
+| `redraw ack` / `drawHome ack` 在第 3/4 次达到几百 ms 以上 | **绘制路径在真机上极慢**（canvas 第一帧后的重绘成本异常），转查绘制成本 |
+| `hb ack` / `redraw ack` 都是个位数毫秒，但日志仍停在 hb 1 | JS 很快却被杀 ⇒ 纯系统侧（内存水位、看门狗、ability 配置），应用已无可改 |
+
+- **独立性**：docs-writer 与 verifier teammate 仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。

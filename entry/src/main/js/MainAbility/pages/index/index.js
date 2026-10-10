@@ -188,6 +188,7 @@ export default {
     this.drawLogged = '';
     this.drawRetry = 0;
     this.drawTimer = null;
+    this.drawCount = 0;
     this.view = 'home';
     /* 视图栈：lite 没有页面栈，这里自己维护一份，保证任意层级都能逐级返回 */
     this.stack = [];
@@ -265,7 +266,9 @@ export default {
        真机日志里最后一条心跳的编号 = 存活秒数 / 2。 */
     this.hbTimer = setInterval(function () {
       self.hbN = self.hbN + 1;
+      var hb0 = new Date().getTime();
       console.info('NexioWatch hb ' + self.hbN);
+      console.info('NexioWatch hb ack ' + (new Date().getTime() - hb0));
     }, 2000);
   },
 
@@ -474,6 +477,7 @@ export default {
       this.fontKey = '';
     }
     var ctx = this.ctx;
+    var rd0 = new Date().getTime();
     /* 复用同一数组：每帧 new Array 会在 30s 定时器与过渡期里持续制造垃圾 */
     this.taps.length = 0;
     ctx.fillStyle = C_BG;
@@ -495,10 +499,21 @@ export default {
       } else {
         this.drawView(ctx, this.view);
       }
-      /* 首帧绘制成功即留一条探针：崩溃若发生在首帧之后，日志里就有分界点 */
+      this.drawCount = this.drawCount + 1;
+      if (this.drawCount >= 2 && this.drawCount <= 4) {
+        console.info('NexioWatch redraw ack ' + (new Date().getTime() - rd0));
+      }
+      /* 首帧绘制成功即留一条探针：崩溃若发生在首帧之后，日志里就有分界点。
+         真机第三轮日志（m11120）显示应用能活到 hb 1（≈2s）、死在 hb 1..2 之间，
+         且 tween 已正常收尾 ⇒ 剩下唯一还在跑的是「tween 收尾后的那一次重画」。
+         所以再标记第 2 次（补间结束后的重画）与第 5 次（稳态）重画。 */
       if (!this.drawLogged) {
         this.drawLogged = this.view;
         console.info('NexioWatch first draw ' + this.view);
+      } else if (this.drawCount === 2) {
+        console.info('NexioWatch redraw 2');
+      } else if (this.drawCount === 5) {
+        console.info('NexioWatch redraw 5');
       }
     } catch (err) {
       /* 绘制异常多半是上下文失效：丢掉缓存，下一帧重新取一次再画错误页 */
@@ -783,6 +798,7 @@ export default {
      官方活动记录右侧那一列页面点已按 m06685 反馈删除（未与圆屏边框对齐）。 */
 
   drawHome(ctx) {
+    var dh0 = new Date().getTime();
     var st = store.get();
     /* 首页不可滚动：清掉上一屏（今日课表）可能留下的滚动状态 */
     this.scrollRows = 0;
@@ -908,6 +924,9 @@ export default {
       var cx = x0 + i * (w + gap);
       this.chip(ctx, labels[i], cx, NAV_Y, w, 36, false);
       this.reg(cx, NAV_Y, w, 36, 'jump', targets[i]);
+    }
+    if (this.drawCount >= 2 && this.drawCount <= 6) {
+      console.info('NexioWatch drawHome ack ' + (new Date().getTime() - dh0));
     }
   },
 

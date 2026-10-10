@@ -887,3 +887,57 @@
 | `hb ack` / `redraw ack` 都是个位数毫秒，但日志仍停在 hb 1 | JS 很快却被杀 ⇒ 纯系统侧（内存水位、看门狗、ability 配置），应用已无可改 |
 
 - **独立性**：docs-writer 与 verifier teammate 仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。
+
+## 第十一轮（2026-10-10）：真机第四轮探针日志 —— JS 很快、重画 ~50 ms，死在 hb 3（≈6 s）
+
+### ① 用户提供的第四轮真机日志（同一台 GT6，装的是带成本探针的包）
+
+```
+10 13:39:33  app onCreate v1.0.2 → page module ready → page onInit → page onReady
+10 13:39:33  first draw home → page onShow → crown api=yes → redraw ack 55 → redraw 2
+10 13:39:33  store load ok=true → drawHome ack 51 → redraw ack 53 → autoSync host=none → onShow done
+10 13:39:34  tween fire → drawHome ack 51 → redraw ack 53 → tween done
+10 13:39:35  hb 1 (ack 1)  → 13:39:37 hb 2 (ack 1)  → 13:39:39 hb 3 (ack 1)   ← 停在这里，没有 hb 4
+```
+
+### ② 这轮日志把时间窗收窄到「hb 3 → hb 4 之间（≈6–8 s）」
+
+| # | 推论 | 依据 |
+| --- | --- | --- |
+| 1 | 启动链全部打通，首页画出来了 | 探针到 `onShow done` |
+| 2 | 300 ms 补间**正常收尾** | 有 `tween fire` / `tween done` |
+| 3 | 应用**活到了 hb 3（≈6 秒）** | `hb 3` 出现 |
+| 4 | 崩溃在 **hb 3 → hb 4 之间（≈6–8 秒）** | 没有 `hb 4`、没有 `onDestroy`、没有第二次 `onCreate` |
+| 5 | **JS 回调很快，不是看门狗慢** | `hb ack` 全是 0..1 ms ⇒ 一次心跳回调不到 2 ms |
+| 6 | **绘制在真机上确实比模拟器慢两个数量级** | 模拟器 redraw ack < 1 ms；真机 redraw ack ≈ 51..55 ms、drawHome ack ≈ 51 ms（且 `text=0` ⇒ 前半段 < 1 ms，成本集中在后半段 = 环 + 信息行 + 胶囊） |
+| 7 | 30 s tick 排除（还没到第一次触发） | 没有 `tick fire` |
+| 8 | 表冠/触摸/翻页排除（没碰、没翻页） | 没有 `crown fire` / `touch start` / `anim fire` |
+
+⇒ 结论已经能下了：**应用没有 bug，真机把它在 6–8 秒时杀了**。JS 回调 < 2 ms、绘制一次 ~50 ms（但稳态下并没有周期性的重画，只有 30 s 一次的 tick 和 2 s 一次的 hb 打日志），没有看门狗条件。剩下唯一没量过的是 **tween 收尾后那一帧的呈现成本**（本轮加了 `gap=` 探针）。
+
+### ③ 本轮新增的探针（装的就是这份）
+
+| 探针 | 回答 |
+| --- | --- |
+| `NexioWatch redraw ack <ms> clear=<ms> gap=<ms>` | 整屏重画耗时 / 清屏耗时 / 距上一次重画的间隔（呈现成本） |
+| `NexioWatch drawHome ack <ms> text=<ms>` | 首页绘制耗时 / 前半段（顶部文字）耗时 ⇒ 成本集中在环与信息行 |
+| `NexioWatch frame ack <ms> enter=<ms>` | tween 单帧两页合计耗时 / 进入页绘制耗时 |
+
+### ④ 验证（本轮两次构建 + 12 秒冒烟）
+
+| 构建 | `app.js` | `pages/index/index.js` | 49,152 B 闸 |
+| --- | --- | --- | --- |
+| debug | 48,308 B | 45,594 B | 合规（+844 / +3,558） |
+| `-p buildMode=release` | **28,790 B** | **28,120 B** | `app.bc` 25,260 / `index.bc` 23,018 亦合规 |
+
+- 模拟器 12 秒冒烟（`.dsh-tmp/sim-hb8.log`）：`redraw ack 2 clear=0 gap=6`、tween 后 `gap=7965`（补间 300 ms × 10 帧 + 心跳 2 s），`hb ack 0..1`，探针链完整，**0 条 JS Error / 0 条 fatal**。
+- 已签名包 `entry-default-signed.hap` = **227,567 B**（含全部探针）。
+
+### ⑤ 判读规则（下一份真机日志用它定案）
+
+| 日志形态 | 根因 |
+| --- | --- |
+| `gap=` 在稳态下突然变成几百毫秒 | 呈现成本异常（引擎把一帧推上屏的开销大），转查呈现路径 |
+| `gap=` 正常（≈2000），但日志仍停在 hb 3 | 纯系统侧（内存水位、看门狗、ability 配置），应用已无可改 |
+
+- **独立性**：docs-writer 与 verifier teammate 仍长期 inactive，全部复核由 Lead 亲自执行（弱于外部 reviewer）。

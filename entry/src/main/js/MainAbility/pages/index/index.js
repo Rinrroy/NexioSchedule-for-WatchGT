@@ -478,10 +478,13 @@ export default {
     }
     var ctx = this.ctx;
     var rd0 = new Date().getTime();
+    this._rdPrev = this._rdPrev || 0;
     /* 复用同一数组：每帧 new Array 会在 30s 定时器与过渡期里持续制造垃圾 */
     this.taps.length = 0;
+    var cf0 = new Date().getTime();
     ctx.fillStyle = C_BG;
     ctx.fillRect(0, 0, W, H);
+    var cf1 = new Date().getTime();
     /* 任何视图绘制异常都不允许留下纯黑画面：捕获后画出可返回的错误提示。
        这是“移植后不显示画面”这类问题的最后一道保险。 */
     try {
@@ -491,18 +494,26 @@ export default {
            而进入页的落点区域始终由它自己或背景占据，不会出现残影。 */
         UI.setOffset(this.animV === 'x' ? this.animDir * W * (1 - e) : 0,
                      this.animV === 'y' ? this.animDir * H * (1 - e) : 0);
+        var f0 = new Date().getTime();
         this.drawView(ctx, this.view);
+        var f1 = new Date().getTime();
         UI.setOffset(this.animV === 'x' ? -this.animDir * W * e : 0,
                      this.animV === 'y' ? -this.animDir * H * e : 0);
         this.drawView(ctx, this.animFrom);
         UI.setOffset(0, 0);
+        if (!this.animCostLogged) {
+          this.animCostLogged = true;
+          console.info('NexioWatch frame ack ' + (new Date().getTime() - f0) + ' enter=' + (f1 - f0));
+        }
       } else {
         this.drawView(ctx, this.view);
       }
       this.drawCount = this.drawCount + 1;
       if (this.drawCount >= 2 && this.drawCount <= 4) {
-        console.info('NexioWatch redraw ack ' + (new Date().getTime() - rd0));
+        var gap = this._rdPrev ? (rd0 - this._rdPrev) : 0;
+        console.info('NexioWatch redraw ack ' + (new Date().getTime() - rd0) + ' clear=' + (cf1 - cf0) + ' gap=' + gap);
       }
+      this._rdPrev = rd0;
       /* 首帧绘制成功即留一条探针：崩溃若发生在首帧之后，日志里就有分界点。
          真机第三轮日志（m11120）显示应用能活到 hb 1（≈2s）、死在 hb 1..2 之间，
          且 tween 已正常收尾 ⇒ 剩下唯一还在跑的是「tween 收尾后的那一次重画」。
@@ -799,6 +810,7 @@ export default {
 
   drawHome(ctx) {
     var dh0 = new Date().getTime();
+    var dh1 = 0;
     var st = store.get();
     /* 首页不可滚动：清掉上一屏（今日课表）可能留下的滚动状态 */
     this.scrollRows = 0;
@@ -834,6 +846,7 @@ export default {
     this.setScalar('bar', curPct);
     var ringColor = (total > 0 && done >= total) ? C_GREEN : C_BLUE;
     UI.drawRing(ctx, HOME_RING_CX, HOME_RING_CY, HOME_RING_R, HOME_RING_LW, this.ringA, ringColor);
+    dh1 = new Date().getTime();
 
     ctx.fillStyle = C_TEXT;
     this.setFont(ctx, 26);
@@ -926,7 +939,7 @@ export default {
       this.reg(cx, NAV_Y, w, 36, 'jump', targets[i]);
     }
     if (this.drawCount >= 2 && this.drawCount <= 6) {
-      console.info('NexioWatch drawHome ack ' + (new Date().getTime() - dh0));
+      console.info('NexioWatch drawHome ack ' + (new Date().getTime() - dh0) + ' text=' + (dh1 - dh0));
     }
   },
 
